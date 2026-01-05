@@ -1,0 +1,1754 @@
+"""
+GUI for ARC-AutoFire - Intelligent Macro System for Arc Raiders.
+"""
+
+import ctypes
+import queue
+import re
+import threading
+import time
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+import win32gui
+
+# Set Windows AppUserModelID to show custom taskbar icon instead of Python default
+try:
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("xViada.ARC-AutoFire.1.0")
+except Exception:
+    pass
+import cv2
+import mss
+import numpy as np
+from PIL import Image, ImageTk
+from pynput import keyboard
+from pynput.keyboard import Key, KeyCode
+
+from .config_manager import ConfigManager
+from .macro_activator import MacroActivator
+from .window_detection import clean_window_title
+
+# Constants
+PREVIEW_MAX_WIDTH = 1200
+PREVIEW_MAX_HEIGHT = 800
+LOG_PROCESS_INTERVAL = 100  # milliseconds
+PREVIEW_DISPLAY_TIME = 3000  # milliseconds
+
+
+class RegionSelector:
+    """Window for selecting regions from screenshot."""
+
+    def __init__(
+        self, parent: tk.Tk, screenshot_path: str, callback: callable
+    ) -> None:
+        """
+        Initialize region selector.
+        
+        Args:
+            parent: Parent window
+            screenshot_path: Path to screenshot image
+            callback: Callback function when region is selected
+        """
+        self.parent = parent
+        self.callback = callback
+        self.screenshot_path = screenshot_path
+
+        self.img = Image.open(screenshot_path)
+        self.zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+
+        self.start_x: Optional[int] = None
+        self.start_y: Optional[int] = None
+        self.end_x: Optional[int] = None
+        self.end_y: Optional[int] = None
+        self.rect_id: Optional[int] = None
+        
+        # Create window
+        self.window = tk.Toplevel(parent)
+        self.window.title("Select Region - Left click to select, Right click to pan, Wheel to zoom")
+        self.window.attributes("-topmost", True)
+        
+        # Set initial window size (fit to screen but not too large)
+        screen_width = self.window.winfo_screenwidth()
+        screen_height = self.window.winfo_screenheight()
+        window_width = min(self.img.width, screen_width - 100)
+        window_height = min(self.img.height + 100, screen_height - 100)
+        self.window.geometry(f"{window_width}x{window_height}+50+50")
+        
+        # Canvas for image
+        self.canvas = tk.Canvas(self.window, cursor="crosshair", bg="black")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Bind events
+        self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<MouseWheel>", self.on_wheel)
+        self.canvas.bind("<Button-4>", self.on_wheel)
+        self.canvas.bind("<Button-5>", self.on_wheel)
+        # Pan with right mouse button
+        self.canvas.bind("<Button-3>", self.on_pan_start)
+        self.canvas.bind("<B3-Motion>", self.on_pan_drag)
+        self.pan_start_x = None
+        self.pan_start_y = None
+        
+        # Buttons frame
+        btn_frame = tk.Frame(self.window)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        tk.Button(btn_frame, text="Set as Weapon Region (Slot 2)", 
+                 command=lambda: self.set_region("weapon")).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Set as Weapon Region (Slot 1)", 
+                 command=lambda: self.set_region("weapon_alt")).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Set as Menu Region", 
+                 command=lambda: self.set_region("menu")).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", 
+                 command=self.window.destroy).pack(side=tk.RIGHT, padx=5)
+        
+        # Info label
+        self.info_label = tk.Label(
+            self.window, 
+            text="Left click + drag to select region | Right click + drag to pan | Mouse wheel to zoom"
+        )
+        self.info_label.pack()
+        
+        # Display image
+        self.update_display()
+        
+        # Handle window close
+        self.window.protocol("WM_DELETE_WINDOW", self.window.destroy)
+    
+    def on_wheel(self, event: tk.Event) -> None:
+        """Handle mouse wheel for zoom."""
+        ZOOM_FACTOR = 1.1
+        MIN_ZOOM = 0.1
+        MAX_ZOOM = 5.0
+        
+        if event.delta > 0 or event.num == 4:
+            self.zoom *= ZOOM_FACTOR
+        else:
+            self.zoom /= ZOOM_FACTOR
+        self.zoom = max(MIN_ZOOM, min(MAX_ZOOM, self.zoom))
+        self.update_display()
+    
+    def on_pan_start(self, event):
+        """Start panning."""
+        self.pan_start_x = event.x
+        self.pan_start_y = event.y
+    
+    def on_pan_drag(self, event):
+        """Handle panning."""
+        if self.pan_start_x is not None and self.pan_start_y is not None:
+            dx = event.x - self.pan_start_x
+            dy = event.y - self.pan_start_y
+            self.pan_x += dx
+            self.pan_y += dy
+            self.pan_start_x = event.x
+            self.pan_start_y = event.y
+            self.update_display()
+    
+    def on_click(self, event):
+        """Handle mouse click start."""
+        self.start_x = event.x
+        self.start_y = event.y
+        self.end_x = None
+        self.end_y = None
+        if self.rect_id:
+            self.canvas.delete(self.rect_id)
+    
+    def on_drag(self, event):
+        """Handle mouse drag."""
+        if self.start_x is not None:
+            self.end_x = event.x
+            self.end_y = event.y
+            if self.rect_id:
+                self.canvas.delete(self.rect_id)
+            self.rect_id = self.canvas.create_rectangle(
+                self.start_x, self.start_y, self.end_x, self.end_y,
+                outline="red", width=2
+            )
+    
+    def on_release(self, event):
+        """Handle mouse release."""
+        if self.start_x is not None and self.end_x is not None:
+            # Convert canvas coordinates to image coordinates
+            img_x1 = int((self.start_x - self.pan_x) / self.zoom)
+            img_y1 = int((self.start_y - self.pan_y) / self.zoom)
+            img_x2 = int((self.end_x - self.pan_x) / self.zoom)
+            img_y2 = int((self.end_y - self.pan_y) / self.zoom)
+            
+            # Ensure correct order
+            left = min(img_x1, img_x2)
+            right = max(img_x1, img_x2)
+            top = min(img_y1, img_y2)
+            bottom = max(img_y1, img_y2)
+            
+            if right > left and bottom > top:
+                self.info_label.config(
+                    text=f"Region: ({left}, {top}, {right}, {bottom}) - Size: {right-left}x{bottom-top}"
+                )
+    
+    def set_region(self, region_type):
+        """Set the selected region."""
+        if self.start_x is None or self.end_x is None:
+            messagebox.showwarning("No Selection", "Please select a region first.")
+            return
+        
+        # Convert to image coordinates
+        img_x1 = int((self.start_x - self.pan_x) / self.zoom)
+        img_y1 = int((self.start_y - self.pan_y) / self.zoom)
+        img_x2 = int((self.end_x - self.pan_x) / self.zoom)
+        img_y2 = int((self.end_y - self.pan_y) / self.zoom)
+        
+        left = min(img_x1, img_x2)
+        right = max(img_x1, img_x2)
+        top = min(img_y1, img_y2)
+        bottom = max(img_y1, img_y2)
+        
+        if right <= left or bottom <= top:
+            messagebox.showwarning("Invalid Selection", "Please select a valid region.")
+            return
+        
+        # Crop and save image
+        region_img = self.img.crop((left, top, right, bottom))
+        image_dir = Path(self.screenshot_path).parent
+        if region_type == "weapon":
+            filename = "weapon.png"
+        elif region_type == "weapon_alt":
+            filename = "weapon_alt.png"
+        else:
+            filename = "menu.png"
+        save_path = image_dir / filename
+        region_img.save(save_path)
+        
+        # Call callback with region coordinates
+        self.callback(region_type, (left, top, right, bottom))
+        self.window.destroy()
+    
+    def update_display(self):
+        """Update canvas display."""
+        # Calculate display size
+        display_width = int(self.img.width * self.zoom)
+        display_height = int(self.img.height * self.zoom)
+        
+        # Resize image
+        resized = self.img.resize((display_width, display_height), Image.Resampling.LANCZOS)
+        
+        # Convert to PhotoImage
+        self.photo = ImageTk.PhotoImage(resized)
+        
+        # Update canvas
+        self.canvas.delete("all")
+        self.canvas.create_image(
+            self.pan_x, self.pan_y, anchor=tk.NW, image=self.photo
+        )
+        self.canvas.config(scrollregion=self.canvas.bbox("all"))
+
+
+class MacroGUI:
+    """Main GUI application."""
+
+    def __init__(self) -> None:
+        """Initialize the GUI application."""
+        self.config_manager = ConfigManager()
+        self.macro_activator: Optional[MacroActivator] = None
+        self.macro_thread: Optional[threading.Thread] = None
+        self.macro_running = False
+        self.macro_paused = False
+        self.should_stop = False
+
+        # Status indicators
+        self.weapon_detected = False
+        self.menu_detected = False
+        self.macro_active = False
+        self.autoclick_running = False
+
+        # Global keybind listener
+        self.keybind_listener: Optional[keyboard.Listener] = None
+
+        # Capture screen listener (temporary)
+        self.capture_listener: Optional[keyboard.Listener] = None
+        self.waiting_for_capture = False
+        self.capture_mode: Optional[str] = None  # "capture" or "autodetect"
+        self.autodetect_step = 1  # 1 = first capture, 2 = second capture
+        self.first_capture_results: Optional[Dict[str, Any]] = None
+        self.alt_pressed = False
+        self.ctrl_pressed = False
+        self.shift_pressed = False
+
+        # Log queue for thread-safe logging
+        self.log_queue = queue.Queue()
+        
+        # Create GUI
+        self.root = tk.Tk()
+        self.root.title("ARC-AutoFire by xViada")
+        icon_path = Path(__file__).parent.parent / "images" / "icon.ico"
+        if icon_path.exists():
+            self.root.iconbitmap(str(icon_path.absolute()))
+        
+        # Load window position/size
+        pos = self.config_manager.get("gui.window_position", [100, 100])
+        size = self.config_manager.get("gui.window_size", [500, 700])
+        self.root.geometry(f"{size[0]}x{size[1]}+{pos[0]}+{pos[1]}")
+        
+        # Handle window close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Create UI
+        self.create_ui()
+        
+        # Start log processor
+        self.root.after(LOG_PROCESS_INTERVAL, self.process_log_queue)
+        
+        # Start global keybind listener
+        self.start_keybind_listener()
+    
+    def create_ui(self):
+        """Create the UI components."""
+        # Notebook for tabs
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Tab 1: Delays Configuration
+        delays_frame = ttk.Frame(notebook)
+        notebook.add(delays_frame, text="Delays")
+        self.create_delays_panel(delays_frame)
+        
+        # Tab 2: Region Setup
+        regions_frame = ttk.Frame(notebook)
+        notebook.add(regions_frame, text="Regions")
+        self.create_regions_panel(regions_frame)
+        
+        # Tab 3: Keybinds
+        keybinds_frame = ttk.Frame(notebook)
+        notebook.add(keybinds_frame, text="Keybinds")
+        self.create_keybinds_panel(keybinds_frame)
+        
+        # Tab 4: Status/Logs
+        status_frame = ttk.Frame(notebook)
+        notebook.add(status_frame, text="Status")
+        self.create_status_panel(status_frame)
+        
+        # Main controls at bottom
+        self.create_main_controls()
+    
+    def create_delays_panel(self, parent):
+        """Create delays configuration panel."""
+        frame = ttk.LabelFrame(parent, text="Click Delays (ms)", padding=10)
+        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Click Down Delay
+        ttk.Label(frame, text="Click Down Delay:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        down_min_frame = ttk.Frame(frame)
+        down_min_frame.grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Label(down_min_frame, text="Min:").pack(side=tk.LEFT)
+        self.down_min_var = tk.StringVar(value=str(self.config_manager.get("delays.click_down_min")))
+        ttk.Entry(down_min_frame, textvariable=self.down_min_var, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Label(down_min_frame, text="Max:").pack(side=tk.LEFT, padx=5)
+        self.down_max_var = tk.StringVar(value=str(self.config_manager.get("delays.click_down_max")))
+        ttk.Entry(down_min_frame, textvariable=self.down_max_var, width=8).pack(side=tk.LEFT, padx=2)
+        self.down_min_var.trace("w", lambda *args: self.save_delays())
+        self.down_max_var.trace("w", lambda *args: self.save_delays())
+        
+        # Click Up Delay
+        ttk.Label(frame, text="Click Up Delay:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        up_min_frame = ttk.Frame(frame)
+        up_min_frame.grid(row=1, column=1, sticky=tk.W, padx=5)
+        ttk.Label(up_min_frame, text="Min:").pack(side=tk.LEFT)
+        self.up_min_var = tk.StringVar(value=str(self.config_manager.get("delays.click_up_min")))
+        ttk.Entry(up_min_frame, textvariable=self.up_min_var, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Label(up_min_frame, text="Max:").pack(side=tk.LEFT, padx=5)
+        self.up_max_var = tk.StringVar(value=str(self.config_manager.get("delays.click_up_max")))
+        ttk.Entry(up_min_frame, textvariable=self.up_max_var, width=8).pack(side=tk.LEFT, padx=2)
+        self.up_min_var.trace("w", lambda *args: self.save_delays())
+        self.up_max_var.trace("w", lambda *args: self.save_delays())
+        
+        # Detection Loop Delay
+        ttk.Label(frame, text="Detection Loop Delay (s):").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.loop_delay_var = tk.StringVar(value=str(self.config_manager.get("delays.detection_loop")))
+        ttk.Entry(frame, textvariable=self.loop_delay_var, width=10).grid(row=2, column=1, sticky=tk.W, padx=5)
+        self.loop_delay_var.trace("w", lambda *args: self.save_delays())
+        
+        # Hash Threshold
+        ttk.Label(frame, text="Hash Threshold (0-256):").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.threshold_var = tk.StringVar(value=str(self.config_manager.get("detection.hash_threshold")))
+        ttk.Entry(frame, textvariable=self.threshold_var, width=10).grid(row=3, column=1, sticky=tk.W, padx=5)
+        self.threshold_var.trace("w", lambda *args: self.save_delays())
+    
+    def save_delays(self):
+        """Save delay configuration."""
+        try:
+            self.config_manager.set("delays.click_down_min", int(self.down_min_var.get()))
+            self.config_manager.set("delays.click_down_max", int(self.down_max_var.get()))
+            self.config_manager.set("delays.click_up_min", int(self.up_min_var.get()))
+            self.config_manager.set("delays.click_up_max", int(self.up_max_var.get()))
+            self.config_manager.set("delays.detection_loop", float(self.loop_delay_var.get()))
+            self.config_manager.set("detection.hash_threshold", int(self.threshold_var.get()))
+            self.config_manager.save()
+        except ValueError:
+            pass  # Invalid input, ignore
+    
+    def create_regions_panel(self, parent):
+        """Create region setup panel."""
+        frame = ttk.LabelFrame(parent, text="Region Configuration", padding=10)
+        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Buttons frame
+        buttons_frame = ttk.Frame(frame)
+        buttons_frame.pack(fill=tk.X, pady=5)
+        
+        # Capture Screen button
+        self.capture_btn = ttk.Button(buttons_frame, text="Capture Screen", command=self.start_capture_wait)
+        self.capture_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Auto-detect Regions button
+        self.autodetect_btn = ttk.Button(buttons_frame, text="Auto-detect Regions", command=self.auto_detect_regions)
+        self.autodetect_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Confidence threshold frame
+        threshold_frame = ttk.Frame(frame)
+        threshold_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(threshold_frame, text="Confidence Threshold:").pack(side=tk.LEFT)
+        threshold_value = self.config_manager.get("detection.confidence_threshold", 0.8)
+        self.confidence_threshold_var = tk.DoubleVar(value=threshold_value)
+        threshold_scale = ttk.Scale(
+            threshold_frame, 
+            from_=0.5, 
+            to=1.0, 
+            variable=self.confidence_threshold_var,
+            orient=tk.HORIZONTAL,
+            length=150
+        )
+        threshold_scale.pack(side=tk.LEFT, padx=5)
+        self.confidence_label = ttk.Label(threshold_frame, text=f"{threshold_value:.2f}")
+        self.confidence_label.pack(side=tk.LEFT, padx=5)
+        threshold_scale.configure(command=lambda v: self.confidence_label.config(text=f"{float(v):.2f}"))
+        
+        # Capture status label
+        self.capture_status_label = ttk.Label(frame, text="", foreground="blue")
+        self.capture_status_label.pack(pady=5)
+        
+        # Region previews
+        preview_frame = ttk.LabelFrame(frame, text="Current Regions", padding=10)
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Weapon region (slot 2)
+        weapon_frame = ttk.Frame(preview_frame)
+        weapon_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(weapon_frame, text="Weapon Region (Slot 2):").pack(side=tk.LEFT)
+        self.weapon_coords_label = ttk.Label(weapon_frame, text="Not set")
+        self.weapon_coords_label.pack(side=tk.LEFT, padx=10)
+        
+        # Weapon region alt (slot 1)
+        weapon_alt_frame = ttk.Frame(preview_frame)
+        weapon_alt_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(weapon_alt_frame, text="Weapon Region (Slot 1):").pack(side=tk.LEFT)
+        self.weapon_alt_coords_label = ttk.Label(weapon_alt_frame, text="Not set")
+        self.weapon_alt_coords_label.pack(side=tk.LEFT, padx=10)
+        
+        # Menu region
+        menu_frame = ttk.Frame(preview_frame)
+        menu_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(menu_frame, text="Menu Region:").pack(side=tk.LEFT)
+        self.menu_coords_label = ttk.Label(menu_frame, text="Not set")
+        self.menu_coords_label.pack(side=tk.LEFT, padx=10)
+        
+        # Update preview after both labels are created
+        self.update_region_preview()
+    
+    def auto_detect_regions(self):
+        """Start waiting for capture keybind to auto-detect regions."""
+        if self.waiting_for_capture and self.capture_mode == "autodetect":
+            self.cancel_capture_wait()
+            return
+        
+        self.waiting_for_capture = True
+        self.capture_mode = "autodetect"
+        self.autodetect_step = 1  # Start with step 1
+        self.first_capture_results = None
+        self.autodetect_btn.config(text="Cancel Auto-detect", state=tk.NORMAL)
+        self.capture_btn.config(state=tk.DISABLED)  # Disable capture button while autodetect is waiting
+        self.capture_status_label.config(
+            text=f"Step 1/2: Capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
+            foreground="blue"
+        )
+        self.log(f"Auto-detect Step 1/2: Waiting for capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
+        
+        # Start listener for capture keybind
+        self.start_capture_listener()
+    
+    def _auto_detect_regions_thread(self, step=1):
+        """Auto-detect regions thread."""
+        try:
+            # Get confidence threshold
+            confidence_threshold = self.confidence_threshold_var.get()
+            self.config_manager.set("detection.confidence_threshold", confidence_threshold)
+            self.config_manager.save()
+            
+            # Capture screen using the same method
+            screen_img, screen_gray, monitor_info = self._capture_screen_for_detection()
+            
+            # Load templates
+            script_dir = Path(__file__).parent
+            project_root = script_dir.parent
+            image_dir = project_root / "images"
+            
+            weapon_template_path = image_dir / "weapon.png"
+            menu_template_path = image_dir / "menu.png"
+            
+            if step == 1:
+                # Step 1: Detect menu and weapon in slot 2
+                if not weapon_template_path.exists():
+                    self.root.after(0, lambda: self._show_detection_error("weapon.png not found in /images"))
+                    return
+                
+                if not menu_template_path.exists():
+                    self.root.after(0, lambda: self._show_detection_error("menu.png not found in /images"))
+                    return
+                
+                # Load templates
+                weapon_template = cv2.imread(str(weapon_template_path), cv2.IMREAD_GRAYSCALE)
+                menu_template = cv2.imread(str(menu_template_path), cv2.IMREAD_GRAYSCALE)
+                
+                if weapon_template is None:
+                    self.root.after(0, lambda: self._show_detection_error("Failed to load weapon.png"))
+                    return
+                
+                if menu_template is None:
+                    self.root.after(0, lambda: self._show_detection_error("Failed to load menu.png"))
+                    return
+                
+                # Perform template matching
+                weapon_result = cv2.matchTemplate(screen_gray, weapon_template, cv2.TM_CCOEFF_NORMED)
+                menu_result = cv2.matchTemplate(screen_gray, menu_template, cv2.TM_CCOEFF_NORMED)
+                
+                # Find best matches
+                _, weapon_max_val, _, weapon_max_loc = cv2.minMaxLoc(weapon_result)
+                _, menu_max_val, _, menu_max_loc = cv2.minMaxLoc(menu_result)
+                
+                # Check if both found with sufficient confidence
+                weapon_found = weapon_max_val >= confidence_threshold
+                menu_found = menu_max_val >= confidence_threshold
+                
+                # Calculate regions
+                weapon_region = None
+                menu_region = None
+                
+                if weapon_found:
+                    h, w = weapon_template.shape
+                    weapon_region = (
+                        weapon_max_loc[0],
+                        weapon_max_loc[1],
+                        weapon_max_loc[0] + w,
+                        weapon_max_loc[1] + h
+                    )
+                
+                if menu_found:
+                    h, w = menu_template.shape
+                    menu_region = (
+                        menu_max_loc[0],
+                        menu_max_loc[1],
+                        menu_max_loc[0] + w,
+                        menu_max_loc[1] + h
+                    )
+                
+                # Store results for step 2
+                self.first_capture_results = {
+                    'weapon_found': weapon_found,
+                    'weapon_region': weapon_region,
+                    'weapon_confidence': weapon_max_val,
+                    'menu_found': menu_found,
+                    'menu_region': menu_region,
+                    'menu_confidence': menu_max_val,
+                    'monitor_info': monitor_info,
+                    'screen_img': screen_img,
+                    'weapon_template': weapon_template  # Store template for step 2
+                }
+                
+                # Show results and ask for step 2
+                self.root.after(0, lambda: self._show_step1_results(
+                    screen_img, weapon_found, weapon_region, weapon_max_val,
+                    menu_found, menu_region, menu_max_val, confidence_threshold, monitor_info
+                ))
+                
+            elif step == 2:
+                # Step 2: Detect weapon in slot 1 using the same weapon.png template
+                if not weapon_template_path.exists():
+                    self.root.after(0, lambda: self._show_detection_error("weapon.png not found in /images"))
+                    return
+                
+                # Use the same weapon template from step 1 if available, otherwise load it
+                if self.first_capture_results and 'weapon_template' in self.first_capture_results:
+                    weapon_template = self.first_capture_results['weapon_template']
+                else:
+                    weapon_template = cv2.imread(str(weapon_template_path), cv2.IMREAD_GRAYSCALE)
+                
+                if weapon_template is None:
+                    self.root.after(0, lambda: self._show_detection_error("Failed to load weapon.png"))
+                    return
+                
+                # Perform template matching for weapon in slot 1 (same template, different position)
+                weapon_alt_result = cv2.matchTemplate(screen_gray, weapon_template, cv2.TM_CCOEFF_NORMED)
+                _, weapon_alt_max_val, _, weapon_alt_max_loc = cv2.minMaxLoc(weapon_alt_result)
+                
+                # Check if found with sufficient confidence
+                weapon_alt_found = weapon_alt_max_val >= confidence_threshold
+                
+                # Calculate region
+                weapon_alt_region = None
+                if weapon_alt_found:
+                    h, w = weapon_template.shape
+                    weapon_alt_region = (
+                        weapon_alt_max_loc[0],
+                        weapon_alt_max_loc[1],
+                        weapon_alt_max_loc[0] + w,
+                        weapon_alt_max_loc[1] + h
+                    )
+                
+                # Combine results from both steps
+                if self.first_capture_results:
+                    self.root.after(0, lambda: self._show_final_detection_results(
+                        self.first_capture_results['screen_img'],
+                        self.first_capture_results['weapon_found'],
+                        self.first_capture_results['weapon_region'],
+                        self.first_capture_results['weapon_confidence'],
+                        weapon_alt_found,
+                        weapon_alt_region,
+                        weapon_alt_max_val,
+                        self.first_capture_results['menu_found'],
+                        self.first_capture_results['menu_region'],
+                        self.first_capture_results['menu_confidence'],
+                        confidence_threshold,
+                        self.first_capture_results['monitor_info']
+                    ))
+                else:
+                    self.root.after(0, lambda: self._show_detection_error("Step 1 results not found. Please start over."))
+            
+        except Exception as e:
+            self.root.after(0, lambda: self._show_detection_error(f"Detection error: {str(e)}"))
+    
+    def _show_detection_error(self, message: str):
+        """Show detection error message."""
+        self.autodetect_btn.config(text="Auto-detect Regions", state=tk.NORMAL)
+        self.capture_btn.config(state=tk.NORMAL)
+        self.capture_status_label.config(text="", foreground="blue")
+        self.waiting_for_capture = False
+        self.capture_mode = None
+        self.autodetect_step = 1
+        self.first_capture_results = None
+        messagebox.showerror("Auto-detection Failed", message)
+        self.log(f"Auto-detection failed: {message}")
+    
+    def _show_step1_results(self, screen_img, weapon_found, weapon_region, weapon_confidence,
+                           menu_found, menu_region, menu_confidence, threshold, monitor_info):
+        """Show step 1 results and prompt for step 2."""
+        # Check if both found
+        if not weapon_found and not menu_found:
+            self._show_detection_error(f"Neither region found. Weapon: {weapon_confidence:.2%}, Menu: {menu_confidence:.2%} (threshold: {threshold:.2%})")
+            return
+        
+        missing = []
+        if not weapon_found:
+            missing.append(f"weapon (confidence: {weapon_confidence:.2%}, threshold: {threshold:.2%})")
+        if not menu_found:
+            missing.append(f"menu (confidence: {menu_confidence:.2%}, threshold: {threshold:.2%})")
+        
+        if missing:
+            self._show_detection_error(f"Missing regions: {', '.join(missing)}")
+            return
+        
+        # Both found - show preview and ask for step 2
+        preview_img = screen_img.copy()
+        
+        # Draw weapon region (green)
+        cv2.rectangle(preview_img, 
+                     (weapon_region[0], weapon_region[1]), 
+                     (weapon_region[2], weapon_region[3]), 
+                     (0, 255, 0), 2)
+        cv2.putText(preview_img, f"Weapon (Slot 2): {weapon_confidence:.1%}", 
+                   (weapon_region[0], weapon_region[1] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Draw menu region (blue)
+        cv2.rectangle(preview_img,
+                     (menu_region[0], menu_region[1]),
+                     (menu_region[2], menu_region[3]),
+                     (255, 0, 0), 2)
+        cv2.putText(preview_img, f"Menu: {menu_confidence:.1%}",
+                   (menu_region[0], menu_region[1] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        
+        # Save preview
+        script_dir = Path(__file__).parent
+        project_root = script_dir.parent
+        image_dir = project_root / "images"
+        preview_path = image_dir / "detection_preview_step1.png"
+        cv2.imwrite(str(preview_path), preview_img)
+        
+        # Show preview window with step 2 prompt
+        self._show_step1_preview_window(str(preview_path), weapon_region, weapon_confidence, menu_region, menu_confidence)
+        
+        # Continue to step 2
+        self.autodetect_step = 2
+        self.capture_status_label.config(
+            text=f"Step 2/2: Capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
+            foreground="blue"
+        )
+        self.log(f"Step 1 complete - Weapon (Slot 2): {weapon_confidence:.1%} at {weapon_region}, Menu: {menu_confidence:.1%} at {menu_region}")
+        self.log(f"Step 2/2: Waiting for capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
+        
+        # Restart capture listener for step 2
+        self.start_capture_listener()
+    
+    def _show_step1_preview_window(
+        self,
+        preview_path: str,
+        weapon_region: Tuple[int, int, int, int],
+        weapon_confidence: float,
+        menu_region: Tuple[int, int, int, int],
+        menu_confidence: float,
+    ) -> None:
+        """Show preview window for step 1 with step 2 prompt."""
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title("Auto-detection Step 1/2 - Results")
+        preview_window.attributes("-topmost", True)
+
+        self._create_preview_info_frame(
+            preview_window, weapon_region, weapon_confidence, menu_region, menu_confidence, step=1
+        )
+        self._create_preview_image_frame(preview_window, preview_path)
+        self._create_preview_button_frame(preview_window, "Continue to Step 2")
+
+    def _create_preview_info_frame(
+        self,
+        parent: tk.Toplevel,
+        weapon_region: Tuple[int, int, int, int],
+        weapon_confidence: float,
+        menu_region: Tuple[int, int, int, int],
+        menu_confidence: float,
+        step: int = 1,
+    ) -> None:
+        """Create info frame for preview window."""
+        info_frame = ttk.Frame(parent)
+        info_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        if step == 1:
+            ttk.Label(
+                info_frame, text="Step 1/2 Complete!", font=("Arial", 12, "bold")
+            ).pack(anchor=tk.W)
+            ttk.Label(
+                info_frame,
+                text=f"Weapon Region (Slot 2): {weapon_region} - Confidence: {weapon_confidence:.1%}",
+            ).pack(anchor=tk.W, padx=20)
+            ttk.Label(
+                info_frame,
+                text=f"Menu Region: {menu_region} - Confidence: {menu_confidence:.1%}",
+            ).pack(anchor=tk.W, padx=20)
+            ttk.Label(info_frame, text="", font=("Arial", 10)).pack()
+            ttk.Label(
+                info_frame,
+                text="Next: Capture screen with weapon in Slot 1",
+                font=("Arial", 10, "bold"),
+                foreground="blue",
+            ).pack(anchor=tk.W, padx=20)
+        else:
+            ttk.Label(
+                info_frame, text="Detection Results:", font=("Arial", 12, "bold")
+            ).pack(anchor=tk.W)
+            ttk.Label(
+                info_frame,
+                text=f"Weapon Region: {weapon_region} - Confidence: {weapon_confidence:.1%}",
+            ).pack(anchor=tk.W, padx=20)
+            ttk.Label(
+                info_frame,
+                text=f"Menu Region: {menu_region} - Confidence: {menu_confidence:.1%}",
+            ).pack(anchor=tk.W, padx=20)
+
+    def _create_preview_image_frame(
+        self, parent: tk.Toplevel, preview_path: str
+    ) -> None:
+        """Create image frame for preview window."""
+        img_frame = ttk.Frame(parent)
+        img_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        img = Image.open(preview_path)
+        img = self._resize_image_if_needed(img)
+
+        photo = ImageTk.PhotoImage(img)
+        canvas = tk.Canvas(img_frame, width=img.width, height=img.height)
+        canvas.pack()
+        canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+        canvas.image = photo
+
+    def _create_preview_button_frame(
+        self, parent: tk.Toplevel, button_text: str
+    ) -> None:
+        """Create button frame for preview window."""
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        ttk.Button(btn_frame, text=button_text, command=parent.destroy).pack(
+            side=tk.RIGHT
+        )
+
+    def _resize_image_if_needed(self, img: Image.Image) -> Image.Image:
+        """Resize image if it exceeds maximum dimensions."""
+        if img.width > PREVIEW_MAX_WIDTH or img.height > PREVIEW_MAX_HEIGHT:
+            ratio = min(PREVIEW_MAX_WIDTH / img.width, PREVIEW_MAX_HEIGHT / img.height)
+            new_width = int(img.width * ratio)
+            new_height = int(img.height * ratio)
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        return img
+    
+    def _show_final_detection_results(self, screen_img, weapon_found, weapon_region, weapon_confidence,
+                                     weapon_alt_found, weapon_alt_region, weapon_alt_confidence,
+                                     menu_found, menu_region, menu_confidence, threshold, monitor_info):
+        """Show final detection results combining both steps."""
+        # Stop capture listener
+        if self.capture_listener:
+            self.capture_listener.stop()
+            self.capture_listener = None
+        
+        self.autodetect_btn.config(text="Auto-detect Regions", state=tk.NORMAL)
+        self.capture_btn.config(state=tk.NORMAL)
+        self.waiting_for_capture = False
+        self.capture_mode = None
+        self.autodetect_step = 1
+        self.first_capture_results = None
+        self.alt_pressed = False
+        self.ctrl_pressed = False
+        self.shift_pressed = False
+        
+        # Check if weapon_alt was found
+        if not weapon_alt_found:
+            self.capture_status_label.config(
+                text=f"Step 2: Weapon (Slot 1) not found (confidence: {weapon_alt_confidence:.2%}, threshold: {threshold:.2%})",
+                foreground="orange"
+            )
+            self.log(f"Step 2: Weapon (Slot 1) not found. Confidence: {weapon_alt_confidence:.2%}, Threshold: {threshold:.2%}")
+            # Continue anyway with just slot 2
+        
+        # Update regions
+        self.config_manager.set("regions.weapon", list(weapon_region))
+        if weapon_alt_region:
+            self.config_manager.set("regions.weapon_alt", list(weapon_alt_region))
+        self.config_manager.set("regions.menu", list(menu_region))
+        
+        # Update screen resolution
+        self.config_manager.set("regions.screen_resolution", [monitor_info["width"], monitor_info["height"]])
+        
+        self.config_manager.save()
+        self.update_region_preview()
+        
+        # Create preview image with all regions marked
+        preview_img = screen_img.copy()
+        
+        # Draw weapon region slot 2 (green)
+        cv2.rectangle(preview_img, 
+                     (weapon_region[0], weapon_region[1]), 
+                     (weapon_region[2], weapon_region[3]), 
+                     (0, 255, 0), 2)
+        cv2.putText(preview_img, f"Weapon (Slot 2): {weapon_confidence:.1%}", 
+                   (weapon_region[0], weapon_region[1] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Draw weapon region slot 1 if found (yellow)
+        if weapon_alt_region:
+            cv2.rectangle(preview_img,
+                         (weapon_alt_region[0], weapon_alt_region[1]),
+                         (weapon_alt_region[2], weapon_alt_region[3]),
+                         (0, 255, 255), 2)
+            cv2.putText(preview_img, f"Weapon (Slot 1): {weapon_alt_confidence:.1%}",
+                       (weapon_alt_region[0], weapon_alt_region[1] - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        
+        # Draw menu region (blue)
+        cv2.rectangle(preview_img,
+                     (menu_region[0], menu_region[1]),
+                     (menu_region[2], menu_region[3]),
+                     (255, 0, 0), 2)
+        cv2.putText(preview_img, f"Menu: {menu_confidence:.1%}",
+                   (menu_region[0], menu_region[1] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        
+        # Save preview
+        script_dir = Path(__file__).parent
+        project_root = script_dir.parent
+        image_dir = project_root / "images"
+        preview_path = image_dir / "detection_preview.png"
+        cv2.imwrite(str(preview_path), preview_img)
+        
+        # Show preview window
+        self._show_preview_window(str(preview_path), weapon_region, weapon_confidence, menu_region, menu_confidence)
+        
+        status_text = f"Auto-detection complete! Weapon (Slot 2): {weapon_confidence:.1%}"
+        if weapon_alt_region:
+            status_text += f", Weapon (Slot 1): {weapon_alt_confidence:.1%}"
+        else:
+            status_text += f", Weapon (Slot 1): Not found"
+        status_text += f", Menu: {menu_confidence:.1%}"
+        self.capture_status_label.config(
+            text=status_text,
+            foreground="green"
+        )
+        log_text = f"Auto-detection complete - Weapon (Slot 2): {weapon_confidence:.1%} at {weapon_region}"
+        if weapon_alt_region:
+            log_text += f", Weapon (Slot 1): {weapon_alt_confidence:.1%} at {weapon_alt_region}"
+        log_text += f", Menu: {menu_confidence:.1%} at {menu_region}"
+        self.log(log_text)
+    
+    def _show_detection_results(self, screen_img, weapon_found, weapon_region, weapon_confidence,
+                               weapon_alt_region, menu_found, menu_region, menu_confidence, threshold, monitor_info):
+        """Show detection results with preview (legacy method - kept for compatibility)."""
+        # This method is no longer used in auto-detect flow, but kept for compatibility
+        # Auto-detect now uses _show_step1_results and _show_final_detection_results
+        self._show_final_detection_results(
+            screen_img, weapon_found, weapon_region, weapon_confidence,
+            weapon_alt_region is not None, weapon_alt_region, 0.0 if weapon_alt_region is None else 1.0,
+            menu_found, menu_region, menu_confidence, threshold, monitor_info
+        )
+    
+    def _show_preview_window(
+        self,
+        preview_path: str,
+        weapon_region: Tuple[int, int, int, int],
+        weapon_confidence: float,
+        menu_region: Tuple[int, int, int, int],
+        menu_confidence: float,
+    ) -> None:
+        """Show preview window with detected regions."""
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title("Auto-detection Results")
+        preview_window.attributes("-topmost", True)
+
+        self._create_preview_info_frame(
+            preview_window, weapon_region, weapon_confidence, menu_region, menu_confidence, step=2
+        )
+        self._create_preview_image_frame(preview_window, preview_path)
+        self._create_preview_button_frame(preview_window, "Close")
+    
+    def update_region_preview(self):
+        """Update region preview labels."""
+        weapon_region = self.config_manager.get("regions.weapon")
+        weapon_alt_region = self.config_manager.get("regions.weapon_alt")
+        menu_region = self.config_manager.get("regions.menu")
+        
+        # Check if labels exist before updating
+        if hasattr(self, 'weapon_coords_label') and weapon_region:
+            self.weapon_coords_label.config(
+                text=f"({weapon_region[0]}, {weapon_region[1]}, {weapon_region[2]}, {weapon_region[3]})"
+            )
+        if hasattr(self, 'weapon_alt_coords_label') and weapon_alt_region:
+            self.weapon_alt_coords_label.config(
+                text=f"({weapon_alt_region[0]}, {weapon_alt_region[1]}, {weapon_alt_region[2]}, {weapon_alt_region[3]})"
+            )
+        if hasattr(self, 'menu_coords_label') and menu_region:
+            self.menu_coords_label.config(
+                text=f"({menu_region[0]}, {menu_region[1]}, {menu_region[2]}, {menu_region[3]})"
+            )
+    
+    def find_game_window(self) -> Optional[int]:
+        """Find ARC Raiders game window handle."""
+        def enum_windows_callback(hwnd, windows):
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd)
+                if title:
+                    cleaned_title = clean_window_title(title)
+                    title_lower = cleaned_title.lower().strip()
+                    
+                    # Check if it's ARC Raiders
+                    normalized_no_space = re.sub(r"[^a-z0-9]", "", title_lower)
+                    if normalized_no_space == "arcraiders":
+                        windows.append(hwnd)
+                    elif (
+                        re.search(r"\barc\s+raiders\b", title_lower)
+                        or re.search(r"\barcraiders\b", title_lower)
+                        or re.search(r"\barc[\s\-:]*raiders\b", title_lower)
+                    ):
+                        if len(title_lower) < 50 and not any(char in title_lower for char in ["\\", "/", ".py", ".exe", "macro"]):
+                            windows.append(hwnd)
+        
+        windows = []
+        win32gui.EnumWindows(enum_windows_callback, windows)
+        return windows[0] if windows else None
+    
+    def get_monitor_for_window(self, hwnd: int, monitors: list) -> Optional[dict]:
+        """Get the monitor that contains the specified window."""
+        try:
+            # Get window rect
+            rect = win32gui.GetWindowRect(hwnd)
+            window_left, window_top, window_right, window_bottom = rect
+            
+            # Calculate window center
+            window_center_x = (window_left + window_right) // 2
+            window_center_y = (window_top + window_bottom) // 2
+            
+            # Find monitor that contains the window center
+            for monitor in monitors[1:]:  # Skip monitor 0 (all monitors combined)
+                if (monitor["left"] <= window_center_x <= monitor["left"] + monitor["width"] and
+                    monitor["top"] <= window_center_y <= monitor["top"] + monitor["height"]):
+                    return monitor
+            
+            # If not found, return primary monitor
+            return monitors[1] if len(monitors) > 1 else None
+        except Exception:
+            return monitors[1] if len(monitors) > 1 else None
+    
+    def start_capture_wait(self):
+        """Start waiting for capture keybind."""
+        if self.waiting_for_capture and self.capture_mode == "capture":
+            self.cancel_capture_wait()
+            return
+        
+        self.waiting_for_capture = True
+        self.capture_mode = "capture"
+        self.capture_btn.config(text="Cancel Capture", state=tk.NORMAL)
+        self.autodetect_btn.config(state=tk.DISABLED)  # Disable autodetect button while capture is waiting
+        self.capture_status_label.config(
+            text=f"Waiting for keybind: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
+            foreground="blue"
+        )
+        self.log(f"Waiting for capture keybind: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
+        
+        # Start listener for capture keybind
+        self.start_capture_listener()
+    
+    def cancel_capture_wait(self):
+        """Cancel capture wait mode."""
+        self.waiting_for_capture = False
+        self.capture_mode = None
+        self.autodetect_step = 1
+        self.first_capture_results = None
+        self.alt_pressed = False
+        self.ctrl_pressed = False
+        self.shift_pressed = False
+        if self.capture_listener:
+            self.capture_listener.stop()
+            self.capture_listener = None
+        self.capture_btn.config(text="Capture Screen", state=tk.NORMAL)
+        self.autodetect_btn.config(text="Auto-detect Regions", state=tk.NORMAL)
+        self.capture_status_label.config(text="", foreground="blue")
+        self.log("Capture cancelled")
+    
+    def start_capture_listener(self):
+        """Start listener for capture keybind."""
+        if self.capture_listener:
+            self.capture_listener.stop()
+        
+        capture_keybind = self.config_manager.get("keybinds.capture_screen", "ALT+P")
+        # Parse keybind (format: "ALT+P", "CTRL+SHIFT+P", etc.)
+        parts = capture_keybind.upper().split("+")
+        modifiers = [p.strip() for p in parts[:-1]]
+        main_key = parts[-1].strip() if parts else "P"
+        
+        def on_press(key):
+            if not self.waiting_for_capture:
+                return
+            
+            try:
+                # Track modifier keys
+                if key == Key.alt_l or key == Key.alt_r:
+                    self.alt_pressed = True
+                    return
+                elif key == Key.ctrl_l or key == Key.ctrl_r:
+                    self.ctrl_pressed = True
+                    return
+                elif key == Key.shift_l or key == Key.shift_r:
+                    self.shift_pressed = True
+                    return
+                
+                # Check if main key is pressed with correct modifiers
+                key_matched = False
+                if isinstance(key, KeyCode) and key.char:
+                    if key.char.upper() == main_key:
+                        key_matched = True
+                elif isinstance(key, Key):
+                    key_name = self.get_key_name_from_listener(key)
+                    if key_name == main_key:
+                        key_matched = True
+                
+                if key_matched:
+                    # Check modifiers
+                    modifiers_ok = True
+                    if "ALT" in modifiers and not self.alt_pressed:
+                        modifiers_ok = False
+                    if "CTRL" in modifiers and not self.ctrl_pressed:
+                        modifiers_ok = False
+                    if "SHIFT" in modifiers and not self.shift_pressed:
+                        modifiers_ok = False
+                    
+                    if modifiers_ok:
+                        # Execute based on mode
+                        if self.capture_mode == "autodetect":
+                            self.root.after(0, self.execute_autodetect)
+                            # Don't stop listener - we need it for step 2
+                            # It will be stopped in _show_final_detection_results
+                        else:
+                            self.root.after(0, self.execute_capture)
+                            return False  # Stop listener for regular capture
+                        return  # Continue listening for autodetect
+                
+                # Reset modifiers if non-modifier key pressed
+                if not isinstance(key, Key) or (key not in [Key.alt_l, Key.alt_r, Key.ctrl_l, Key.ctrl_r, Key.shift_l, Key.shift_r]):
+                    self.alt_pressed = False
+                    self.ctrl_pressed = False
+                    self.shift_pressed = False
+            except Exception:
+                pass
+        
+        def on_release(key):
+            if key == Key.alt_l or key == Key.alt_r:
+                self.alt_pressed = False
+            elif key == Key.ctrl_l or key == Key.ctrl_r:
+                self.ctrl_pressed = False
+            elif key == Key.shift_l or key == Key.shift_r:
+                self.shift_pressed = False
+        
+        self.capture_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self.capture_listener.start()
+    
+    def _capture_screen_for_detection(self):
+        """Capture screen and return image array and monitor info."""
+        # Minimize GUI
+        self.root.iconify()
+        time.sleep(0.5)
+        
+        # Find game window
+        game_hwnd = self.find_game_window()
+        
+        with mss.mss() as sct:
+            monitors = sct.monitors
+            
+            if game_hwnd:
+                # Get monitor where game is running
+                monitor = self.get_monitor_for_window(game_hwnd, monitors)
+                if monitor:
+                    self.log(f"Capturing monitor where game is running: {monitor['width']}x{monitor['height']}")
+                    screenshot = sct.grab(monitor)
+                    monitor_info = monitor
+                else:
+                    # Fallback to primary monitor
+                    self.log("Game window found but monitor detection failed, using primary monitor")
+                    screenshot = sct.grab(monitors[1])
+                    monitor_info = monitors[1]
+            else:
+                # Game not found, use primary monitor
+                self.log("Game window not found, capturing primary monitor")
+                screenshot = sct.grab(monitors[1])
+                monitor_info = monitors[1]
+            
+            # Convert to numpy array
+            img_array = np.array(screenshot)
+            screen_img = cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
+            screen_gray = cv2.cvtColor(img_array, cv2.COLOR_BGRA2GRAY)
+            
+            return screen_img, screen_gray, monitor_info
+    
+    def execute_capture(self):
+        """Execute the actual screen capture."""
+        if not self.waiting_for_capture or self.capture_mode != "capture":
+            return
+        
+        self.waiting_for_capture = False
+        self.capture_mode = None
+        self.alt_pressed = False
+        self.ctrl_pressed = False
+        self.shift_pressed = False
+        if self.capture_listener:
+            self.capture_listener.stop()
+            self.capture_listener = None
+        
+        self.capture_btn.config(text="Capture Screen", state=tk.NORMAL)
+        self.autodetect_btn.config(state=tk.NORMAL)
+        self.capture_status_label.config(text="Capturing...", foreground="green")
+        self.log("Capture keybind pressed - capturing screen")
+        
+        # Capture screen
+        screen_img, screen_gray, monitor_info = self._capture_screen_for_detection()
+        
+        # Convert to PIL Image for saving
+        img = Image.fromarray(cv2.cvtColor(screen_img, cv2.COLOR_BGR2RGB))
+        
+        # Save temporary screenshot
+        script_dir = Path(__file__).parent
+        project_root = script_dir.parent
+        image_dir = project_root / "images"
+        image_dir.mkdir(exist_ok=True)
+        screenshot_path = image_dir / "temp_screenshot.png"
+        img.save(screenshot_path)
+        
+        # Reset status
+        self.capture_status_label.config(text="", foreground="blue")
+        
+        # Show region selector
+        self.root.after(100, lambda: RegionSelector(
+            self.root, str(screenshot_path), self.on_region_selected
+        ))
+    
+    def execute_autodetect(self):
+        """Execute auto-detection after capture."""
+        if not self.waiting_for_capture or self.capture_mode != "autodetect":
+            return
+        
+        # Don't stop the listener - we need it for step 2
+        self.alt_pressed = False
+        self.ctrl_pressed = False
+        self.shift_pressed = False
+        
+        current_step = self.autodetect_step
+        self.capture_status_label.config(text=f"Capturing and detecting (Step {current_step}/2)...", foreground="green")
+        self.log(f"Capture keybind pressed - capturing screen for auto-detection (Step {current_step}/2)")
+        
+        # Run detection in thread with current step
+        threading.Thread(target=lambda: self._auto_detect_regions_thread(step=current_step), daemon=True).start()
+    
+    def on_region_selected(self, region_type, coords):
+        """Handle region selection."""
+        self.config_manager.set(f"regions.{region_type}", list(coords))
+        
+        # Update screen resolution - use the monitor where game is running
+        game_hwnd = self.find_game_window()
+        with mss.mss() as sct:
+            monitors = sct.monitors
+            if game_hwnd:
+                monitor = self.get_monitor_for_window(game_hwnd, monitors)
+                if monitor:
+                    self.config_manager.set("regions.screen_resolution", [monitor["width"], monitor["height"]])
+                else:
+                    monitor = monitors[1]
+                    self.config_manager.set("regions.screen_resolution", [monitor["width"], monitor["height"]])
+            else:
+                monitor = monitors[1]
+                self.config_manager.set("regions.screen_resolution", [monitor["width"], monitor["height"]])
+        
+        # Save region image
+        self.config_manager.save()
+        self.update_region_preview()
+        self.log(f"{region_type.capitalize()} region set: {coords} (Screen: {monitor['width']}x{monitor['height']})")
+        
+        # Restore GUI
+        self.root.deiconify()
+        self.root.lift()
+    
+    def create_keybinds_panel(self, parent):
+        """Create keybinds configuration panel."""
+        frame = ttk.LabelFrame(parent, text="Global Keybinds", padding=10)
+        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Pause/Resume
+        pause_frame = ttk.Frame(frame)
+        pause_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(pause_frame, text="Pause/Resume:").pack(side=tk.LEFT)
+        self.pause_key_var = tk.StringVar(value=self.config_manager.get("keybinds.pause_resume"))
+        pause_entry = ttk.Entry(pause_frame, textvariable=self.pause_key_var, width=15)
+        pause_entry.pack(side=tk.LEFT, padx=10)
+        pause_entry.bind("<KeyPress>", lambda e: self.on_keybind_change(e, "pause_resume"))
+        
+        # Stop
+        stop_frame = ttk.Frame(frame)
+        stop_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(stop_frame, text="Stop Completely:").pack(side=tk.LEFT)
+        self.stop_key_var = tk.StringVar(value=self.config_manager.get("keybinds.stop"))
+        stop_entry = ttk.Entry(stop_frame, textvariable=self.stop_key_var, width=15)
+        stop_entry.pack(side=tk.LEFT, padx=10)
+        stop_entry.bind("<KeyPress>", lambda e: self.on_keybind_change(e, "stop"))
+        
+        # Capture Screen
+        capture_frame = ttk.Frame(frame)
+        capture_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(capture_frame, text="Capture Screen:").pack(side=tk.LEFT)
+        self.capture_key_var = tk.StringVar(value=self.config_manager.get("keybinds.capture_screen", "ALT+P"))
+        capture_entry = ttk.Entry(capture_frame, textvariable=self.capture_key_var, width=15)
+        capture_entry.pack(side=tk.LEFT, padx=10)
+        capture_entry.bind("<KeyPress>", lambda e: self.on_capture_keybind_change(e))
+        
+        # Status indicator
+        status_frame = ttk.LabelFrame(frame, text="Status", padding=10)
+        status_frame.pack(fill=tk.X, pady=10)
+        self.status_label = ttk.Label(status_frame, text="Stopped", font=("Arial", 12, "bold"))
+        self.status_label.pack()
+    
+    def on_keybind_change(self, event, keybind_type):
+        """Handle keybind change."""
+        key_name = self.get_key_name(event)
+        if key_name:
+            self.config_manager.set(f"keybinds.{keybind_type}", key_name)
+            self.config_manager.save()
+            # Restart keybind listener
+            self.start_keybind_listener()
+            self.log(f"{keybind_type} keybind set to {key_name}")
+    
+    def on_capture_keybind_change(self, event):
+        """Handle capture keybind change."""
+        # Check for Alt modifier
+        modifiers = []
+        if event.state & 0x20000:  # Alt key
+            modifiers.append("ALT")
+        if event.state & 0x4:  # Control key
+            modifiers.append("CTRL")
+        if event.state & 0x1:  # Shift key
+            modifiers.append("SHIFT")
+        
+        key_name = self.get_key_name(event)
+        if key_name:
+            if modifiers:
+                keybind_str = "+".join(modifiers) + "+" + key_name
+            else:
+                keybind_str = key_name
+            
+            self.config_manager.set("keybinds.capture_screen", keybind_str)
+            self.config_manager.save()
+            self.capture_key_var.set(keybind_str)
+            
+            # Restart capture listener if waiting
+            if self.waiting_for_capture:
+                self.start_capture_listener()
+            
+            self.log(f"Capture screen keybind set to {keybind_str}")
+    
+    def get_key_name(self, event):
+        """Get key name from event."""
+        if event.keysym.startswith("F") and event.keysym[1:].isdigit():
+            return event.keysym.upper()
+        elif event.keysym == "Escape":
+            return "ESC"
+        elif event.keysym == "Return":
+            return "ENTER"
+        elif event.keysym == "space":
+            return "SPACE"
+        elif len(event.keysym) == 1:
+            return event.keysym.upper()
+        return None
+    
+    def create_status_panel(self, parent):
+        """Create status/logs panel."""
+        # Status indicators frame
+        indicators_frame = ttk.LabelFrame(parent, text="Status Indicators", padding=10)
+        indicators_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Create LED indicators
+        self.create_led_indicator(indicators_frame, "Weapon Detected", 0, 0)
+        self.create_led_indicator(indicators_frame, "Menu Detected", 0, 1)
+        self.create_led_indicator(indicators_frame, "Macro Active", 1, 0)
+        self.create_led_indicator(indicators_frame, "Autoclick Running", 1, 1)
+        
+        # Logs frame
+        logs_frame = ttk.LabelFrame(parent, text="Logs", padding=10)
+        logs_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        self.log_text = scrolledtext.ScrolledText(logs_frame, height=15, wrap=tk.WORD)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.config(state=tk.DISABLED)
+    
+    def create_led_indicator(self, parent, label, row, col):
+        """Create an LED status indicator."""
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=col, padx=10, pady=5, sticky=tk.W)
+        
+        # LED canvas
+        canvas = tk.Canvas(frame, width=20, height=20, highlightthickness=0)
+        canvas.pack(side=tk.LEFT, padx=5)
+        led_id = canvas.create_oval(2, 2, 18, 18, fill="gray", outline="black", width=1)
+        
+        ttk.Label(frame, text=label).pack(side=tk.LEFT)
+        
+        # Store reference
+        if not hasattr(self, "led_indicators"):
+            self.led_indicators = {}
+        self.led_indicators[label] = (canvas, led_id)
+    
+    def update_led(self, label, state):
+        """Update LED indicator state."""
+        if hasattr(self, "led_indicators") and label in self.led_indicators:
+            canvas, led_id = self.led_indicators[label]
+            color = "green" if state else "red"
+            canvas.itemconfig(led_id, fill=color)
+    
+    def create_main_controls(self):
+        """Create main control buttons."""
+        frame = tk.Frame(self.root)
+        frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Start/Stop button
+        self.start_stop_btn = tk.Button(
+            frame, text="START", command=self.toggle_macro,
+            font=("Arial", 14, "bold"), bg="#4CAF50", fg="white",
+            width=15, height=2
+        )
+        self.start_stop_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Options frame
+        options_frame = ttk.Frame(frame)
+        options_frame.pack(side=tk.RIGHT, padx=5)
+        
+        self.minimize_to_tray_var = tk.BooleanVar(
+            value=self.config_manager.get("gui.minimize_to_tray")
+        )
+        ttk.Checkbutton(
+            options_frame, text="Minimize to tray",
+            variable=self.minimize_to_tray_var,
+            command=self.save_gui_settings
+        ).pack(anchor=tk.W)
+        
+        self.run_on_startup_var = tk.BooleanVar(
+            value=self.config_manager.get("gui.run_on_startup")
+        )
+        ttk.Checkbutton(
+            options_frame, text="Run on startup",
+            variable=self.run_on_startup_var,
+            command=self.save_gui_settings
+        ).pack(anchor=tk.W)
+        
+        # Signature/Credits
+        self.create_signature()
+    
+    def save_gui_settings(self):
+        """Save GUI settings."""
+        self.config_manager.set("gui.minimize_to_tray", self.minimize_to_tray_var.get())
+        self.config_manager.set("gui.run_on_startup", self.run_on_startup_var.get())
+        self.config_manager.save()
+    
+    def create_signature(self):
+        """Create signature/credits at the bottom of the window."""
+        import webbrowser
+        
+        signature_frame = tk.Frame(self.root)
+        signature_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        # Create a clickable link label
+        link_label = tk.Label(
+            signature_frame,
+            text="Created by xViada",
+            font=("Arial", 9),
+            fg="#0066cc",
+            cursor="hand2"
+        )
+        link_label.pack()
+        
+        # Bind click event to open GitHub
+        link_label.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/xViada"))
+        
+        # Add hover effect
+        link_label.bind("<Enter>", lambda e: link_label.config(fg="#0099ff", font=("Arial", 9, "underline")))
+        link_label.bind("<Leave>", lambda e: link_label.config(fg="#0066cc", font=("Arial", 9)))
+    
+    def toggle_macro(self):
+        """Toggle macro start/stop."""
+        if not self.macro_running:
+            self.start_macro()
+        else:
+            self.stop_macro()
+    
+    def start_macro(self):
+        """Start the macro."""
+        if self.macro_running:
+            return
+        
+        # Load configuration
+        config = self.config_manager.config
+        
+        # Check if templates exist
+        script_dir = Path(__file__).parent
+        project_root = script_dir.parent
+        image_dir = project_root / "images"
+        
+        weapon_path = image_dir / "weapon.png"
+        if not weapon_path.exists():
+            messagebox.showerror("Error", "Weapon template not found. Please capture a weapon region first.")
+            return
+        
+        # Initialize macro activator
+        weapon_region = tuple(config["regions"]["weapon"])
+        weapon_region_alt = tuple(config["regions"].get("weapon_alt", config["regions"]["weapon"]))
+        menu_region = tuple(config["regions"]["menu"])
+        
+        self.macro_activator = MacroActivator(
+            image_dir=str(image_dir),
+            hash_threshold=config["detection"]["hash_threshold"],
+            weapon_region=weapon_region,
+            weapon_region_alt=weapon_region_alt,
+            menu_region=menu_region,
+            screen_width=config["regions"]["screen_resolution"][0],
+            screen_height=config["regions"]["screen_resolution"][1],
+            hash_size=config["detection"]["hash_size"],
+        )
+        
+        # Update autoclicker delays
+        self.macro_activator.autoclicker.click_down_min = config["delays"]["click_down_min"]
+        self.macro_activator.autoclicker.click_down_max = config["delays"]["click_down_max"]
+        self.macro_activator.autoclicker.click_up_min = config["delays"]["click_up_min"]
+        self.macro_activator.autoclicker.click_up_max = config["delays"]["click_up_max"]
+        
+        # Start macro in thread
+        self.macro_running = True
+        self.macro_paused = False
+        self.should_stop = False
+        
+        self.macro_thread = threading.Thread(target=self.macro_loop, daemon=True)
+        self.macro_thread.start()
+        
+        # Update UI
+        self.start_stop_btn.config(text="STOP", bg="#f44336")
+        self.status_label.config(text="Running")
+        self.log("Macro started")
+    
+    def stop_macro(self):
+        """Stop the macro."""
+        self.should_stop = True
+        self.macro_running = False
+        self.macro_paused = False
+        
+        if self.macro_activator:
+            self.macro_activator._deactivate_macro()
+            self.macro_activator.autoclicker.stop()
+        
+        # Update UI
+        self.start_stop_btn.config(text="START", bg="#4CAF50")
+        self.status_label.config(text="Stopped")
+        self.log("Macro stopped")
+    
+    def pause_resume_macro(self):
+        """Pause or resume the macro."""
+        if not self.macro_running:
+            return
+        
+        self.macro_paused = not self.macro_paused
+        status = "Paused" if self.macro_paused else "Running"
+        self.status_label.config(text=status)
+        self.log(f"Macro {status.lower()}")
+    
+    def macro_loop(self):
+        """Main macro loop running in separate thread."""
+        loop_delay = self.config_manager.get("delays.detection_loop", 0.3)
+        
+        while not self.should_stop:
+            if self.macro_paused:
+                time.sleep(0.1)
+                continue
+            
+            try:
+                # Run detection cycle - check both weapon regions
+                weapon_img = self.macro_activator.detector.capture_region(self.macro_activator.weapon_region)
+                weapon_alt_img = self.macro_activator.detector.capture_region(self.macro_activator.weapon_region_alt) if self.macro_activator.weapon_alt_hash else None
+                menu_img = self.macro_activator.detector.capture_region(self.macro_activator.menu_region) if self.macro_activator.menu_hash else None
+                
+                if weapon_img is None:
+                    time.sleep(loop_delay)
+                    continue
+                
+                # Detect weapon in slot 2 region
+                weapon_detected_slot2, weapon_distance = self.macro_activator.detector.detect_hash(
+                    weapon_img, self.macro_activator.weapon_hash, debug=False
+                )
+                
+                # Detect weapon in slot 1 region (alternative position)
+                weapon_alt_detected = False
+                weapon_alt_distance = 999
+                if weapon_alt_img is not None and self.macro_activator.weapon_alt_hash is not None:
+                    weapon_alt_detected, weapon_alt_distance = self.macro_activator.detector.detect_hash(
+                        weapon_alt_img, self.macro_activator.weapon_alt_hash, debug=False
+                    )
+                
+                # Use the BEST match (lowest distance) between both regions, but only if it's below threshold
+                # This ensures we detect the weapon in the correct position, not a different weapon
+                threshold = self.macro_activator.detector.hash_threshold
+                
+                if weapon_detected_slot2 and weapon_alt_detected:
+                    # Both detected - use the one with lower distance
+                    if weapon_distance <= weapon_alt_distance:
+                        weapon_detected = True
+                        weapon_distance_final = weapon_distance
+                    else:
+                        weapon_detected = True
+                        weapon_distance_final = weapon_alt_distance
+                elif weapon_detected_slot2:
+                    # Only slot 2 detected
+                    weapon_detected = True
+                    weapon_distance_final = weapon_distance
+                elif weapon_alt_detected:
+                    # Only slot 1 detected
+                    weapon_detected = True
+                    weapon_distance_final = weapon_alt_distance
+                else:
+                    # Neither detected - use the better distance for logging
+                    weapon_detected = False
+                    weapon_distance_final = min(weapon_distance, weapon_alt_distance)
+                
+                # Update weapon_distance for logging
+                weapon_distance = weapon_distance_final
+                
+                # Log detection details for debugging (only log when state changes to avoid spam)
+                threshold = self.macro_activator.detector.hash_threshold
+                
+                if not weapon_detected and self.weapon_detected:
+                    # Just stopped detecting
+                    self.log(f"Weapon lost - Slot 2: dist={weapon_distance} (threshold={threshold}), Slot 1: dist={weapon_alt_distance}")
+                elif weapon_detected and not self.weapon_detected:
+                    # Just started detecting
+                    if weapon_distance <= threshold:
+                        self.log(f"Weapon detected in Slot 2 - dist={weapon_distance} (threshold={threshold})")
+                    elif weapon_alt_distance <= threshold:
+                        self.log(f"Weapon detected in Slot 1 - dist={weapon_alt_distance} (threshold={threshold})")
+                elif not weapon_detected:
+                    # Not detected - log occasionally to help diagnose
+                    if weapon_distance > threshold or weapon_alt_distance > threshold:
+                        # Only log every 20th check to avoid spam, but always log if distance is very high
+                        import random
+                        if random.randint(1, 20) == 1 or weapon_distance > threshold + 3 or weapon_alt_distance > threshold + 3:
+                            suggestion = ""
+                            if weapon_distance > threshold:
+                                suggestion = f" (consider increasing threshold from {threshold} to {weapon_distance + 1})"
+                            self.log(f"Weapon not detected - Slot 2: dist={weapon_distance}, Slot 1: dist={weapon_alt_distance} (threshold={threshold}){suggestion}")
+                
+                # Detect menu
+                menu_detected = False
+                if menu_img is not None and self.macro_activator.menu_hash is not None:
+                    menu_detected, _ = self.macro_activator.detector.detect_hash(
+                        menu_img, self.macro_activator.menu_hash, debug=False
+                    )
+                
+                # Update status
+                self.weapon_detected = weapon_detected
+                self.menu_detected = menu_detected
+                
+                # Logic: activate macro ONLY if weapon detected AND menu NOT detected
+                should_activate = weapon_detected and not menu_detected
+                
+                if should_activate:
+                    if not self.macro_activator.macro_active:
+                        self.macro_activator._activate_macro()
+                        self.macro_active = True
+                        self.log("Weapon detected - Macro activated")
+                else:
+                    if self.macro_activator.macro_active:
+                        self.macro_activator._deactivate_macro()
+                        self.macro_active = False
+                        if menu_detected:
+                            self.log("Menu detected - Macro paused")
+                        else:
+                            self.log("Weapon not detected - Macro deactivated")
+                
+                # Update autoclick status
+                self.autoclick_running = self.macro_activator.autoclicker.autoclick_running
+                
+                # Update LEDs
+                self.root.after(0, lambda: self.update_led("Weapon Detected", weapon_detected))
+                self.root.after(0, lambda: self.update_led("Menu Detected", menu_detected))
+                self.root.after(0, lambda: self.update_led("Macro Active", self.macro_active))
+                self.root.after(0, lambda: self.update_led("Autoclick Running", self.autoclick_running))
+                
+                time.sleep(loop_delay)
+                
+            except Exception as e:
+                self.log(f"Error in macro loop: {e}")
+                time.sleep(loop_delay)
+    
+    def start_keybind_listener(self):
+        """Start global keybind listener."""
+        if self.keybind_listener:
+            self.keybind_listener.stop()
+        
+        pause_key = self.config_manager.get("keybinds.pause_resume", "F6")
+        stop_key = self.config_manager.get("keybinds.stop", "F7")
+        
+        def on_press(key):
+            try:
+                key_name = self.get_key_name_from_listener(key)
+                if key_name == pause_key:
+                    self.root.after(0, self.pause_resume_macro)
+                elif key_name == stop_key:
+                    self.root.after(0, self.stop_macro)
+            except Exception:
+                pass
+        
+        self.keybind_listener = keyboard.Listener(on_press=on_press)
+        self.keybind_listener.start()
+    
+    def get_key_name_from_listener(self, key):
+        """Get key name from pynput key."""
+        if isinstance(key, Key):
+            # Handle F keys
+            if hasattr(key, 'name') and key.name and key.name.startswith('f'):
+                return key.name.upper()
+            # Handle special keys
+            key_map = {
+                Key.esc: "ESC",
+                Key.enter: "ENTER",
+                Key.space: "SPACE",
+                Key.tab: "TAB",
+                Key.backspace: "BACKSPACE",
+                Key.delete: "DELETE",
+            }
+            return key_map.get(key)
+        elif isinstance(key, KeyCode):
+            if key.char:
+                return key.char.upper()
+            elif hasattr(key, 'vk') and key.vk:
+                # Handle F keys via virtual key codes
+                # F1-F12 are vk codes 112-123
+                if 112 <= key.vk <= 123:
+                    return f"F{key.vk - 111}"
+        return None
+    
+    def log(self, message):
+        """Add log message (thread-safe)."""
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_queue.put(f"[{timestamp}] {message}\n")
+    
+    def process_log_queue(self):
+        """Process log queue (called from main thread)."""
+        try:
+            while True:
+                message = self.log_queue.get_nowait()
+                self.log_text.config(state=tk.NORMAL)
+                self.log_text.insert(tk.END, message)
+                self.log_text.see(tk.END)
+                self.log_text.config(state=tk.DISABLED)
+        except queue.Empty:
+            pass
+        
+        self.root.after(LOG_PROCESS_INTERVAL, self.process_log_queue)
+    
+    def on_closing(self):
+        """Handle window closing."""
+        # Save window position/size
+        geometry = self.root.geometry()
+        parts = geometry.split("+")
+        if len(parts) == 3:
+            size = parts[0].split("x")
+            pos = [int(parts[1]), int(parts[2])]
+            self.config_manager.set("gui.window_position", pos)
+            self.config_manager.set("gui.window_size", [int(size[0]), int(size[1])])
+            self.config_manager.save()
+        
+        # Stop macro
+        if self.macro_running:
+            self.stop_macro()
+        
+        # Stop keybind listener
+        if self.keybind_listener:
+            self.keybind_listener.stop()
+        
+        # Stop capture listener
+        if self.capture_listener:
+            self.capture_listener.stop()
+        
+        # Close window
+        self.root.destroy()
+    
+    def run(self):
+        """Run the GUI."""
+        self.log("GUI started")
+        self.root.mainloop()
+
+
+def main():
+    """Entry point for GUI."""
+    app = MacroGUI()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
+

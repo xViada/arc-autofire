@@ -1,0 +1,9 @@
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+pynput>=1.7.6
+pywin32>=306
+interception-python>=0.6.0
+imagehash>=4.3.1
+mss>=10.0.0
+
