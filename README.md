@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/banner.png" alt="ARC-AutoFire Banner" width="800">
+</p>
+
 # ARC-AutoFire - Intelligent Macro System for Arc Raiders
 
 An intelligent macro activator for Arc Raiders that uses perceptual hashing to detect weapon states and automatically activate/deactivate macros based on game conditions.
