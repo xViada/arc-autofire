@@ -24,6 +24,7 @@ import numpy as np
 from PIL import Image, ImageTk
 from pynput import keyboard
 from pynput.keyboard import Key, KeyCode
+import pystray
 
 from .config_manager import ConfigManager
 from .macro_activator import MacroActivator
@@ -287,6 +288,11 @@ class MacroGUI:
         icon_path = Path(__file__).parent.parent / "images" / "icon.ico"
         if icon_path.exists():
             self.root.iconbitmap(str(icon_path.absolute()))
+        
+        # System tray icon
+        self.tray_icon: Optional[pystray.Icon] = None
+        self.tray_thread: Optional[threading.Thread] = None
+        self._setup_tray_icon(icon_path)
         
         # Load window position/size
         pos = self.config_manager.get("gui.window_position", [100, 100])
@@ -1710,17 +1716,86 @@ class MacroGUI:
         
         self.root.after(LOG_PROCESS_INTERVAL, self.process_log_queue)
     
-    def on_closing(self):
-        """Handle window closing."""
+    def _setup_tray_icon(self, icon_path: Path):
+        """Setup system tray icon."""
+        # Load icon image for tray
+        if icon_path.exists():
+            tray_image = Image.open(str(icon_path))
+        else:
+            # Create a simple fallback icon if no icon file
+            tray_image = Image.new('RGB', (64, 64), color='#4CAF50')
+        
+        # Create tray menu
+        menu = pystray.Menu(
+            pystray.MenuItem("Show", self._show_window, default=True),
+            pystray.MenuItem("Start/Stop Macro", self._toggle_macro_from_tray),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Exit", self._exit_from_tray)
+        )
+        
+        # Create tray icon
+        self.tray_icon = pystray.Icon(
+            "ARC-AutoFire",
+            tray_image,
+            "ARC-AutoFire",
+            menu
+        )
+    
+    def _start_tray_icon(self):
+        """Start tray icon in a separate thread."""
+        if self.tray_icon and not self.tray_thread:
+            self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+            self.tray_thread.start()
+    
+    def _stop_tray_icon(self):
+        """Stop tray icon."""
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.tray_icon = None
+            self.tray_thread = None
+    
+    def _show_window(self, icon=None, item=None):
+        """Show the main window from tray."""
+        self.root.after(0, self._restore_window)
+    
+    def _restore_window(self):
+        """Restore window to screen (called from main thread)."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+    
+    def _hide_to_tray(self):
+        """Hide window to system tray."""
+        self._start_tray_icon()
+        self.root.withdraw()
+        self.log("Minimized to system tray")
+    
+    def _toggle_macro_from_tray(self, icon=None, item=None):
+        """Toggle macro from tray menu."""
+        self.root.after(0, self.toggle_macro)
+    
+    def _exit_from_tray(self, icon=None, item=None):
+        """Exit application from tray."""
+        self.root.after(0, self._force_close)
+    
+    def _force_close(self):
+        """Force close the application (bypass minimize to tray)."""
+        self._cleanup_and_close()
+    
+    def _cleanup_and_close(self):
+        """Cleanup resources and close application."""
         # Save window position/size
-        geometry = self.root.geometry()
-        parts = geometry.split("+")
-        if len(parts) == 3:
-            size = parts[0].split("x")
-            pos = [int(parts[1]), int(parts[2])]
-            self.config_manager.set("gui.window_position", pos)
-            self.config_manager.set("gui.window_size", [int(size[0]), int(size[1])])
-            self.config_manager.save()
+        try:
+            geometry = self.root.geometry()
+            parts = geometry.split("+")
+            if len(parts) == 3:
+                size = parts[0].split("x")
+                pos = [int(parts[1]), int(parts[2])]
+                self.config_manager.set("gui.window_position", pos)
+                self.config_manager.set("gui.window_size", [int(size[0]), int(size[1])])
+                self.config_manager.save()
+        except Exception:
+            pass
         
         # Stop macro
         if self.macro_running:
@@ -1734,8 +1809,19 @@ class MacroGUI:
         if self.capture_listener:
             self.capture_listener.stop()
         
+        # Stop tray icon
+        self._stop_tray_icon()
+        
         # Close window
         self.root.destroy()
+    
+    def on_closing(self):
+        """Handle window closing."""
+        # Check if minimize to tray is enabled
+        if hasattr(self, 'minimize_to_tray_var') and self.minimize_to_tray_var.get():
+            self._hide_to_tray()
+        else:
+            self._cleanup_and_close()
     
     def run(self):
         """Run the GUI."""
