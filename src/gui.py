@@ -318,9 +318,9 @@ class MacroGUI:
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Tab 1: Delays Configuration
-        delays_frame = ttk.Frame(notebook)
-        notebook.add(delays_frame, text="Delays")
-        self.create_delays_panel(delays_frame)
+        settings_frame = ttk.Frame(notebook)
+        notebook.add(settings_frame, text="Settings")
+        self.create_delays_panel(settings_frame)
         
         # Tab 2: Region Setup
         regions_frame = ttk.Frame(notebook)
@@ -341,57 +341,159 @@ class MacroGUI:
         self.create_main_controls()
     
     def create_delays_panel(self, parent):
-        """Create delays configuration panel."""
-        frame = ttk.LabelFrame(parent, text="Click Delays (ms)", padding=10)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Click Down Delay
-        ttk.Label(frame, text="Click Down Delay:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        down_min_frame = ttk.Frame(frame)
-        down_min_frame.grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Label(down_min_frame, text="Min:").pack(side=tk.LEFT)
-        self.down_min_var = tk.StringVar(value=str(self.config_manager.get("delays.click_down_min")))
-        ttk.Entry(down_min_frame, textvariable=self.down_min_var, width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Label(down_min_frame, text="Max:").pack(side=tk.LEFT, padx=5)
-        self.down_max_var = tk.StringVar(value=str(self.config_manager.get("delays.click_down_max")))
-        ttk.Entry(down_min_frame, textvariable=self.down_max_var, width=8).pack(side=tk.LEFT, padx=2)
-        self.down_min_var.trace("w", lambda *args: self.save_delays())
-        self.down_max_var.trace("w", lambda *args: self.save_delays())
-        
-        # Click Up Delay
-        ttk.Label(frame, text="Click Up Delay:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        up_min_frame = ttk.Frame(frame)
-        up_min_frame.grid(row=1, column=1, sticky=tk.W, padx=5)
-        ttk.Label(up_min_frame, text="Min:").pack(side=tk.LEFT)
-        self.up_min_var = tk.StringVar(value=str(self.config_manager.get("delays.click_up_min")))
-        ttk.Entry(up_min_frame, textvariable=self.up_min_var, width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Label(up_min_frame, text="Max:").pack(side=tk.LEFT, padx=5)
-        self.up_max_var = tk.StringVar(value=str(self.config_manager.get("delays.click_up_max")))
-        ttk.Entry(up_min_frame, textvariable=self.up_max_var, width=8).pack(side=tk.LEFT, padx=2)
-        self.up_min_var.trace("w", lambda *args: self.save_delays())
-        self.up_max_var.trace("w", lambda *args: self.save_delays())
+        """Create delays configuration panel with per-weapon settings."""
+        # Detection settings frame
+        detection_frame = ttk.LabelFrame(parent, text="Detection Settings", padding=10)
+        detection_frame.pack(fill=tk.X, padx=5, pady=5)
         
         # Detection Loop Delay
-        ttk.Label(frame, text="Detection Loop Delay (s):").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(detection_frame, text="Detection Loop Delay (s):").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.loop_delay_var = tk.StringVar(value=str(self.config_manager.get("delays.detection_loop")))
-        ttk.Entry(frame, textvariable=self.loop_delay_var, width=10).grid(row=2, column=1, sticky=tk.W, padx=5)
+        ttk.Entry(detection_frame, textvariable=self.loop_delay_var, width=10).grid(row=0, column=1, sticky=tk.W, padx=5)
         self.loop_delay_var.trace("w", lambda *args: self.save_delays())
         
         # Hash Threshold
-        ttk.Label(frame, text="Hash Threshold (0-256):").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(detection_frame, text="Hash Threshold (0-256):").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.threshold_var = tk.StringVar(value=str(self.config_manager.get("detection.hash_threshold")))
-        ttk.Entry(frame, textvariable=self.threshold_var, width=10).grid(row=3, column=1, sticky=tk.W, padx=5)
+        ttk.Entry(detection_frame, textvariable=self.threshold_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=5)
         self.threshold_var.trace("w", lambda *args: self.save_delays())
+        
+        # Weapons configuration frame with scrollable area
+        weapons_outer_frame = ttk.LabelFrame(parent, text="Weapon Delays (ms)", padding=10)
+        weapons_outer_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create scrollable canvas for weapons
+        canvas = tk.Canvas(weapons_outer_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(weapons_outer_frame, orient="vertical", command=canvas.yview)
+        self.weapons_frame = ttk.Frame(canvas)
+        
+        self.weapons_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=self.weapons_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Store weapon delay variables
+        self.weapon_delay_vars = {}
+        
+        # Get weapons from config
+        weapons = self.config_manager.get("weapons", {})
+        
+        for idx, (weapon_id, weapon_config) in enumerate(weapons.items()):
+            self._create_weapon_delay_widgets(weapon_id, weapon_config, idx)
+        
+        # Legacy delay variables (kept for backwards compatibility)
+        self.down_min_var = tk.StringVar(value=str(self.config_manager.get("delays.click_down_min")))
+        self.down_max_var = tk.StringVar(value=str(self.config_manager.get("delays.click_down_max")))
+        self.up_min_var = tk.StringVar(value=str(self.config_manager.get("delays.click_up_min")))
+        self.up_max_var = tk.StringVar(value=str(self.config_manager.get("delays.click_up_max")))
+    
+    def _create_weapon_delay_widgets(self, weapon_id: str, weapon_config: dict, row_idx: int):
+        """Create delay configuration widgets for a single weapon."""
+        weapon_name = weapon_config.get("name", weapon_id.capitalize())
+        enabled = weapon_config.get("enabled", True)
+        delays = weapon_config.get("delays", {})
+        
+        # Weapon frame
+        weapon_frame = ttk.LabelFrame(self.weapons_frame, text=weapon_name, padding=5)
+        weapon_frame.pack(fill=tk.X, pady=5, padx=5)
+        
+        # Enabled checkbox
+        enabled_var = tk.BooleanVar(value=enabled)
+        enabled_cb = ttk.Checkbutton(
+            weapon_frame, 
+            text="Enabled", 
+            variable=enabled_var,
+            command=lambda wid=weapon_id, var=enabled_var: self._save_weapon_enabled(wid, var.get())
+        )
+        enabled_cb.grid(row=0, column=0, sticky=tk.W, padx=5)
+        
+        # Click Down Delay
+        down_frame = ttk.Frame(weapon_frame)
+        down_frame.grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(down_frame, text="Down:").pack(side=tk.LEFT)
+        
+        down_min_var = tk.StringVar(value=str(delays.get("click_down_min", 54)))
+        down_min_entry = ttk.Entry(down_frame, textvariable=down_min_var, width=5)
+        down_min_entry.pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(down_frame, text="-").pack(side=tk.LEFT)
+        
+        down_max_var = tk.StringVar(value=str(delays.get("click_down_max", 64)))
+        down_max_entry = ttk.Entry(down_frame, textvariable=down_max_var, width=5)
+        down_max_entry.pack(side=tk.LEFT, padx=2)
+        
+        # Click Up Delay
+        up_frame = ttk.Frame(weapon_frame)
+        up_frame.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(up_frame, text="Up:").pack(side=tk.LEFT)
+        
+        up_min_var = tk.StringVar(value=str(delays.get("click_up_min", 54)))
+        up_min_entry = ttk.Entry(up_frame, textvariable=up_min_var, width=5)
+        up_min_entry.pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(up_frame, text="-").pack(side=tk.LEFT)
+        
+        up_max_var = tk.StringVar(value=str(delays.get("click_up_max", 64)))
+        up_max_entry = ttk.Entry(up_frame, textvariable=up_max_var, width=5)
+        up_max_entry.pack(side=tk.LEFT, padx=2)
+        
+        # Store variables
+        self.weapon_delay_vars[weapon_id] = {
+            "enabled": enabled_var,
+            "down_min": down_min_var,
+            "down_max": down_max_var,
+            "up_min": up_min_var,
+            "up_max": up_max_var,
+        }
+        
+        # Bind trace for auto-save
+        for var_name, var in [("down_min", down_min_var), ("down_max", down_max_var), 
+                              ("up_min", up_min_var), ("up_max", up_max_var)]:
+            var.trace("w", lambda *args, wid=weapon_id: self._save_weapon_delays(wid))
+    
+    def _save_weapon_enabled(self, weapon_id: str, enabled: bool):
+        """Save weapon enabled state."""
+        self.config_manager.set(f"weapons.{weapon_id}.enabled", enabled)
+        self.config_manager.save()
+    
+    def _save_weapon_delays(self, weapon_id: str):
+        """Save weapon delay configuration."""
+        if weapon_id not in self.weapon_delay_vars:
+            return
+        
+        vars_dict = self.weapon_delay_vars[weapon_id]
+        try:
+            delays = {
+                "click_down_min": int(vars_dict["down_min"].get()),
+                "click_down_max": int(vars_dict["down_max"].get()),
+                "click_up_min": int(vars_dict["up_min"].get()),
+                "click_up_max": int(vars_dict["up_max"].get()),
+            }
+            self.config_manager.set(f"weapons.{weapon_id}.delays", delays)
+            self.config_manager.save()
+        except ValueError:
+            pass  # Invalid input, ignore
     
     def save_delays(self):
         """Save delay configuration."""
         try:
-            self.config_manager.set("delays.click_down_min", int(self.down_min_var.get()))
-            self.config_manager.set("delays.click_down_max", int(self.down_max_var.get()))
-            self.config_manager.set("delays.click_up_min", int(self.up_min_var.get()))
-            self.config_manager.set("delays.click_up_max", int(self.up_max_var.get()))
+            # Save detection settings
             self.config_manager.set("delays.detection_loop", float(self.loop_delay_var.get()))
             self.config_manager.set("detection.hash_threshold", int(self.threshold_var.get()))
+            
+            # Legacy delay settings (backwards compatibility)
+            if hasattr(self, 'down_min_var'):
+                self.config_manager.set("delays.click_down_min", int(self.down_min_var.get()))
+                self.config_manager.set("delays.click_down_max", int(self.down_max_var.get()))
+                self.config_manager.set("delays.click_up_min", int(self.up_min_var.get()))
+                self.config_manager.set("delays.click_up_max", int(self.up_max_var.get()))
+            
             self.config_manager.save()
         except ValueError:
             pass  # Invalid input, ignore
@@ -1454,17 +1556,26 @@ class MacroGUI:
         # Load configuration
         config = self.config_manager.config
         
-        # Check if templates exist
+        # Check if any weapon templates exist
         script_dir = Path(__file__).parent
         project_root = script_dir.parent
         image_dir = project_root / "images"
         
-        weapon_path = image_dir / "weapon.png"
-        if not weapon_path.exists():
-            messagebox.showerror("Error", "Weapon template not found. Please capture a weapon region first.")
+        # Get weapons config and check for at least one enabled weapon with template
+        weapons_config = config.get("weapons", {})
+        has_weapon = False
+        for weapon_id, weapon_data in weapons_config.items():
+            if weapon_data.get("enabled", True):
+                template = weapon_data.get("template", f"{weapon_id}.png")
+                if (image_dir / template).exists():
+                    has_weapon = True
+                    break
+        
+        if not has_weapon:
+            messagebox.showerror("Error", "No weapon templates found. Add weapon images (kettle.png, burletta.png, etc.) to the /images folder.")
             return
         
-        # Initialize macro activator
+        # Initialize macro activator with weapons config
         weapon_region = tuple(config["regions"]["weapon"])
         weapon_region_alt = tuple(config["regions"].get("weapon_alt", config["regions"]["weapon"]))
         menu_region = tuple(config["regions"]["menu"])
@@ -1478,13 +1589,8 @@ class MacroGUI:
             screen_width=config["regions"]["screen_resolution"][0],
             screen_height=config["regions"]["screen_resolution"][1],
             hash_size=config["detection"]["hash_size"],
+            weapons_config=weapons_config,
         )
-        
-        # Update autoclicker delays
-        self.macro_activator.autoclicker.click_down_min = config["delays"]["click_down_min"]
-        self.macro_activator.autoclicker.click_down_max = config["delays"]["click_down_max"]
-        self.macro_activator.autoclicker.click_up_min = config["delays"]["click_up_min"]
-        self.macro_activator.autoclicker.click_up_max = config["delays"]["click_up_max"]
         
         # Start macro in thread
         self.macro_running = True
@@ -1497,7 +1603,10 @@ class MacroGUI:
         # Update UI
         self.start_stop_btn.config(text="STOP", bg="#f44336")
         self.status_label.config(text="Running")
-        self.log("Macro started")
+        
+        # Log loaded weapons
+        loaded_weapons = [w["name"] for w in self.macro_activator.weapon_hashes.values()]
+        self.log(f"Macro started - Loaded weapons: {', '.join(loaded_weapons)}")
     
     def stop_macro(self):
         """Stop the macro."""
@@ -1527,6 +1636,7 @@ class MacroGUI:
     def macro_loop(self):
         """Main macro loop running in separate thread."""
         loop_delay = self.config_manager.get("delays.detection_loop", 0.3)
+        last_detected_weapon = None
         
         while not self.should_stop:
             if self.macro_paused:
@@ -1534,78 +1644,71 @@ class MacroGUI:
                 continue
             
             try:
-                # Run detection cycle - check both weapon regions
+                # Run detection cycle using multi-weapon system
                 weapon_img = self.macro_activator.detector.capture_region(self.macro_activator.weapon_region)
-                weapon_alt_img = self.macro_activator.detector.capture_region(self.macro_activator.weapon_region_alt) if self.macro_activator.weapon_alt_hash else None
+                weapon_alt_img = self.macro_activator.detector.capture_region(self.macro_activator.weapon_region_alt) if self.macro_activator.weapon_hashes else None
                 menu_img = self.macro_activator.detector.capture_region(self.macro_activator.menu_region) if self.macro_activator.menu_hash else None
                 
                 if weapon_img is None:
                     time.sleep(loop_delay)
                     continue
                 
-                # Detect weapon in slot 2 region
-                weapon_detected_slot2, weapon_distance = self.macro_activator.detector.detect_hash(
-                    weapon_img, self.macro_activator.weapon_hash, debug=False
-                )
+                # Detect weapon in slot 2 using multi-weapon detection
+                weapon_detected_slot2, weapon_id_slot2, distance_slot2 = self.macro_activator.detect_weapon(weapon_img)
                 
-                # Detect weapon in slot 1 region (alternative position)
-                weapon_alt_detected = False
-                weapon_alt_distance = 999
-                if weapon_alt_img is not None and self.macro_activator.weapon_alt_hash is not None:
-                    weapon_alt_detected, weapon_alt_distance = self.macro_activator.detector.detect_hash(
-                        weapon_alt_img, self.macro_activator.weapon_alt_hash, debug=False
-                    )
+                # Detect weapon in slot 1 (alternative position)
+                weapon_detected_slot1 = False
+                weapon_id_slot1 = None
+                distance_slot1 = 999
+                if weapon_alt_img is not None:
+                    weapon_detected_slot1, weapon_id_slot1, distance_slot1 = self.macro_activator.detect_weapon(weapon_alt_img)
                 
-                # Use the BEST match (lowest distance) between both regions, but only if it's below threshold
-                # This ensures we detect the weapon in the correct position, not a different weapon
+                # Use the BEST match (lowest distance) between both regions
                 threshold = self.macro_activator.detector.hash_threshold
+                weapon_detected = False
+                detected_weapon_id = None
+                best_distance = 999
+                detected_slot = None
                 
-                if weapon_detected_slot2 and weapon_alt_detected:
-                    # Both detected - use the one with lower distance
-                    if weapon_distance <= weapon_alt_distance:
+                if weapon_detected_slot2 and weapon_detected_slot1:
+                    if distance_slot2 <= distance_slot1:
                         weapon_detected = True
-                        weapon_distance_final = weapon_distance
+                        detected_weapon_id = weapon_id_slot2
+                        best_distance = distance_slot2
+                        detected_slot = 2
                     else:
                         weapon_detected = True
-                        weapon_distance_final = weapon_alt_distance
+                        detected_weapon_id = weapon_id_slot1
+                        best_distance = distance_slot1
+                        detected_slot = 1
                 elif weapon_detected_slot2:
-                    # Only slot 2 detected
                     weapon_detected = True
-                    weapon_distance_final = weapon_distance
-                elif weapon_alt_detected:
-                    # Only slot 1 detected
+                    detected_weapon_id = weapon_id_slot2
+                    best_distance = distance_slot2
+                    detected_slot = 2
+                elif weapon_detected_slot1:
                     weapon_detected = True
-                    weapon_distance_final = weapon_alt_distance
+                    detected_weapon_id = weapon_id_slot1
+                    best_distance = distance_slot1
+                    detected_slot = 1
                 else:
-                    # Neither detected - use the better distance for logging
-                    weapon_detected = False
-                    weapon_distance_final = min(weapon_distance, weapon_alt_distance)
+                    best_distance = min(distance_slot2, distance_slot1)
                 
-                # Update weapon_distance for logging
-                weapon_distance = weapon_distance_final
+                # Apply delays for detected weapon
+                if weapon_detected and detected_weapon_id:
+                    self.macro_activator.apply_weapon_delays(detected_weapon_id)
                 
-                # Log detection details for debugging (only log when state changes to avoid spam)
-                threshold = self.macro_activator.detector.hash_threshold
-                
+                # Log detection changes
                 if not weapon_detected and self.weapon_detected:
-                    # Just stopped detecting
-                    self.log(f"Weapon lost - Slot 2: dist={weapon_distance} (threshold={threshold}), Slot 1: dist={weapon_alt_distance}")
-                elif weapon_detected and not self.weapon_detected:
-                    # Just started detecting
-                    if weapon_distance <= threshold:
-                        self.log(f"Weapon detected in Slot 2 - dist={weapon_distance} (threshold={threshold})")
-                    elif weapon_alt_distance <= threshold:
-                        self.log(f"Weapon detected in Slot 1 - dist={weapon_alt_distance} (threshold={threshold})")
-                elif not weapon_detected:
-                    # Not detected - log occasionally to help diagnose
-                    if weapon_distance > threshold or weapon_alt_distance > threshold:
-                        # Only log every 20th check to avoid spam, but always log if distance is very high
-                        import random
-                        if random.randint(1, 20) == 1 or weapon_distance > threshold + 3 or weapon_alt_distance > threshold + 3:
-                            suggestion = ""
-                            if weapon_distance > threshold:
-                                suggestion = f" (consider increasing threshold from {threshold} to {weapon_distance + 1})"
-                            self.log(f"Weapon not detected - Slot 2: dist={weapon_distance}, Slot 1: dist={weapon_alt_distance} (threshold={threshold}){suggestion}")
+                    self.log(f"Weapon lost - Slot 2: dist={distance_slot2}, Slot 1: dist={distance_slot1} (threshold={threshold})")
+                    last_detected_weapon = None
+                elif weapon_detected and detected_weapon_id != last_detected_weapon:
+                    weapon_name = self.macro_activator.weapon_hashes.get(detected_weapon_id, {}).get("name", detected_weapon_id)
+                    delays = self.macro_activator.weapon_hashes.get(detected_weapon_id, {}).get("delays", {})
+                    self.log(f"Detected {weapon_name} in Slot {detected_slot} - dist={best_distance} (threshold={threshold})")
+                    if delays:
+                        self.log(f"  Applied delays: down={delays.get('click_down_min', 54)}-{delays.get('click_down_max', 64)}ms, up={delays.get('click_up_min', 54)}-{delays.get('click_up_max', 64)}ms")
+                    last_detected_weapon = detected_weapon_id
                 
                 # Detect menu
                 menu_detected = False
@@ -1625,7 +1728,8 @@ class MacroGUI:
                     if not self.macro_activator.macro_active:
                         self.macro_activator._activate_macro()
                         self.macro_active = True
-                        self.log("Weapon detected - Macro activated")
+                        weapon_name = self.macro_activator.weapon_hashes.get(detected_weapon_id, {}).get("name", detected_weapon_id)
+                        self.log(f"{weapon_name} detected - Macro activated")
                 else:
                     if self.macro_activator.macro_active:
                         self.macro_activator._deactivate_macro()

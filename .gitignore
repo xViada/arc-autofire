@@ -16,6 +16,19 @@ build/
 *.egg-info/
 *.egg
 
+# Installer stuff (provisionally)
+installer.iss
+build.bat
+BUILD_INSTRUCTIONS.md
+arc-autofire.spec
+redist/
+
+# Installer output (upload these to GitHub Releases, not to repo)
+installer_output/
+
+# Interception driver (redistributable)
+redist/install-interception.exe
+
 # IDE settings
 .vscode/
 .idea/

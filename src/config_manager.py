@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from .config import (
     DEFAULT_SCREEN_WIDTH,
@@ -17,6 +17,7 @@ from .config import (
     AUTOCLICK_DOWN_DELAY_MAX,
     AUTOCLICK_UP_DELAY_MIN,
     AUTOCLICK_UP_DELAY_MAX,
+    DEFAULT_WEAPONS,
 )
 
 
@@ -57,6 +58,7 @@ class ConfigManager:
                 "menu": list(DEFAULT_MENU_REGION),
                 "screen_resolution": [DEFAULT_SCREEN_WIDTH, DEFAULT_SCREEN_HEIGHT],
             },
+            "weapons": DEFAULT_WEAPONS.copy(),
             "keybinds": {
                 "pause_resume": "F6",
                 "stop": "F7",
@@ -68,6 +70,35 @@ class ConfigManager:
                 "minimize_to_tray": False,
                 "run_on_startup": False,
             },
+        }
+    
+    def get_enabled_weapons(self) -> List[Dict[str, Any]]:
+        """Get list of enabled weapons with their configurations."""
+        weapons = self.get("weapons", DEFAULT_WEAPONS)
+        enabled = []
+        for weapon_id, weapon_config in weapons.items():
+            if weapon_config.get("enabled", True):
+                config = weapon_config.copy()
+                config["id"] = weapon_id
+                enabled.append(config)
+        return enabled
+    
+    def get_weapon_delays(self, weapon_id: str) -> Dict[str, int]:
+        """Get delay configuration for a specific weapon."""
+        weapons = self.get("weapons", DEFAULT_WEAPONS)
+        if weapon_id in weapons:
+            return weapons[weapon_id].get("delays", {
+                "click_down_min": AUTOCLICK_DOWN_DELAY_MIN,
+                "click_down_max": AUTOCLICK_DOWN_DELAY_MAX,
+                "click_up_min": AUTOCLICK_UP_DELAY_MIN,
+                "click_up_max": AUTOCLICK_UP_DELAY_MAX,
+            })
+        # Return default delays if weapon not found
+        return {
+            "click_down_min": AUTOCLICK_DOWN_DELAY_MIN,
+            "click_down_max": AUTOCLICK_DOWN_DELAY_MAX,
+            "click_up_min": AUTOCLICK_UP_DELAY_MIN,
+            "click_up_max": AUTOCLICK_UP_DELAY_MAX,
         }
     
     def load(self) -> Dict[str, Any]:

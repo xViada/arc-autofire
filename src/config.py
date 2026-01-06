@@ -15,19 +15,47 @@ DEFAULT_HASH_SIZE = 16
 DEFAULT_LOOP_DELAY = 0.3
 DEFAULT_INACTIVE_DELAY = 0.5
 
-# Auto-click timing (milliseconds)
+# Auto-click timing (milliseconds) - Default values, can be overridden per weapon
 AUTOCLICK_DOWN_DELAY_MIN = 54
 AUTOCLICK_DOWN_DELAY_MAX = 64
 AUTOCLICK_UP_DELAY_MIN = 54
 AUTOCLICK_UP_DELAY_MAX = 64
 
-# Template filenames
+# Template filenames (legacy - kept for backwards compatibility)
 WEAPON_TEMPLATE_NAME = "weapon.png"
 MENU_TEMPLATE_NAME = "menu.png"
 
 # Debug filenames
 DEBUG_WEAPON_FILENAME = "debug_weapon.png"
 DEBUG_MENU_FILENAME = "debug_menu.png"
+
+# Weapon configurations with individual delay settings
+# Each weapon has: name, template_file, and delay settings (ms)
+# Delays can be customized per weapon for optimal fire rate
+DEFAULT_WEAPONS = {
+    "kettle": {
+        "name": "Kettle",
+        "template": "kettle.png",
+        "enabled": True,
+        "delays": {
+            "click_down_min": 33,
+            "click_down_max": 37,
+            "click_up_min": 33,
+            "click_up_max": 37,
+        }
+    },
+    "burletta": {
+        "name": "Burletta",
+        "template": "burletta.png",
+        "enabled": True,
+        "delays": {
+            "click_down_min": 33,
+            "click_down_max": 37,
+            "click_up_min": 33,
+            "click_up_max": 37,
+        }
+    },
+}
 
 # Window detection keywords to exclude
 EXCLUDED_WINDOW_KEYWORDS = [

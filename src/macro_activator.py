@@ -29,6 +29,11 @@ from .config import (
     DEBUG_WEAPON_FILENAME,
     DEBUG_MENU_FILENAME,
     EXCLUDED_WINDOW_KEYWORDS,
+    DEFAULT_WEAPONS,
+    AUTOCLICK_DOWN_DELAY_MIN,
+    AUTOCLICK_DOWN_DELAY_MAX,
+    AUTOCLICK_UP_DELAY_MIN,
+    AUTOCLICK_UP_DELAY_MAX,
 )
 from .detection import HashDetector
 from .autoclick import AutoClicker
@@ -40,6 +45,7 @@ class MacroActivator:
     Weapon and menu detection using perceptual hash.
     
     Macro activates only if: weapon equipped AND menu NOT visible.
+    Supports multiple weapons with individual delay configurations.
     """
 
     def __init__(
@@ -52,6 +58,7 @@ class MacroActivator:
         screen_width: int = DEFAULT_SCREEN_WIDTH,
         screen_height: int = DEFAULT_SCREEN_HEIGHT,
         hash_size: int = DEFAULT_HASH_SIZE,
+        weapons_config: Optional[dict] = None,
     ):
         """
         Initialize the macro activator.
@@ -65,6 +72,7 @@ class MacroActivator:
             screen_width: Screen width in pixels
             screen_height: Screen height in pixels
             hash_size: Hash size (8, 16, or 32) - larger = more precise
+            weapons_config: Dictionary of weapon configurations with delays
         """
         self.macro_active = False
         self.screen_width = screen_width
@@ -78,14 +86,26 @@ class MacroActivator:
         self.weapon_region = weapon_region or DEFAULT_WEAPON_REGION
         self.weapon_region_alt = weapon_region_alt or DEFAULT_WEAPON_REGION_ALT
         self.menu_region = menu_region or DEFAULT_MENU_REGION
+        
+        # Store weapons config
+        self.weapons_config = weapons_config or DEFAULT_WEAPONS
+        
+        # Track currently detected weapon for delay switching
+        self.current_weapon_id: Optional[str] = None
 
         self._print_region_info()
 
-        # Load templates - use same weapon template for both slots
-        self.weapon_hash = self._load_template_hash(WEAPON_TEMPLATE_NAME, "weapon")
-        self.weapon_alt_hash = self.weapon_hash
-        if self.weapon_hash:
-            print("Using same weapon template for both slot 1 and slot 2 detection")
+        # Load multiple weapon templates
+        self.weapon_hashes = self._load_weapon_templates()
+        
+        # Legacy compatibility - use first available weapon hash
+        self.weapon_hash = None
+        self.weapon_alt_hash = None
+        if self.weapon_hashes:
+            first_weapon = next(iter(self.weapon_hashes.values()))
+            self.weapon_hash = first_weapon.get("hash")
+            self.weapon_alt_hash = self.weapon_hash
+        
         self.menu_hash = self._load_template_hash(MENU_TEMPLATE_NAME, "menu")
 
     def _resolve_image_dir(self, image_dir: str) -> Path:
@@ -97,6 +117,110 @@ class MacroActivator:
         script_dir = Path(__file__).parent
         project_root = script_dir.parent
         return project_root / image_dir
+    
+    def _load_weapon_templates(self) -> dict:
+        """
+        Load all enabled weapon templates and their configurations.
+        
+        Returns:
+            Dictionary mapping weapon_id to {hash, name, delays}
+        """
+        weapon_hashes = {}
+        
+        for weapon_id, weapon_config in self.weapons_config.items():
+            if not weapon_config.get("enabled", True):
+                continue
+            
+            template_name = weapon_config.get("template", f"{weapon_id}.png")
+            template_path = self.image_dir / template_name
+            
+            if not template_path.exists():
+                print(f"Weapon template not found: {template_path}")
+                continue
+            
+            template_img = self.detector.load_image(template_path)
+            if template_img is None:
+                print(f"Failed to load weapon template: {template_path}")
+                continue
+            
+            template_hash = self.detector.calculate_hash(template_img)
+            if template_hash is None:
+                print(f"Failed to calculate hash for: {template_path}")
+                continue
+            
+            weapon_name = weapon_config.get("name", weapon_id.capitalize())
+            delays = weapon_config.get("delays", {
+                "click_down_min": AUTOCLICK_DOWN_DELAY_MIN,
+                "click_down_max": AUTOCLICK_DOWN_DELAY_MAX,
+                "click_up_min": AUTOCLICK_UP_DELAY_MIN,
+                "click_up_max": AUTOCLICK_UP_DELAY_MAX,
+            })
+            
+            weapon_hashes[weapon_id] = {
+                "hash": template_hash,
+                "name": weapon_name,
+                "delays": delays,
+            }
+            
+            print(f"Loaded weapon '{weapon_name}' ({template_name}): {template_img.shape[1]}x{template_img.shape[0]} px")
+            print(f"  Hash: {template_hash}")
+            print(f"  Delays: down={delays['click_down_min']}-{delays['click_down_max']}ms, up={delays['click_up_min']}-{delays['click_up_max']}ms")
+        
+        if not weapon_hashes:
+            print("WARNING: No weapon templates loaded!")
+        else:
+            print(f"Loaded {len(weapon_hashes)} weapon(s): {', '.join(weapon_hashes.keys())}")
+        
+        return weapon_hashes
+    
+    def detect_weapon(self, weapon_img: np.ndarray) -> Tuple[bool, Optional[str], int]:
+        """
+        Detect which weapon (if any) matches the captured image.
+        
+        Args:
+            weapon_img: Captured weapon region image
+            
+        Returns:
+            Tuple (detected: bool, weapon_id: str or None, best_distance: int)
+        """
+        if not self.weapon_hashes:
+            return False, None, 999
+        
+        best_match = None
+        best_distance = 999
+        
+        for weapon_id, weapon_data in self.weapon_hashes.items():
+            detected, distance = self.detector.detect_hash(
+                weapon_img, weapon_data["hash"], debug=False
+            )
+            
+            if detected and distance < best_distance:
+                best_distance = distance
+                best_match = weapon_id
+        
+        return best_match is not None, best_match, best_distance
+    
+    def apply_weapon_delays(self, weapon_id: str) -> None:
+        """
+        Apply the delay configuration for a specific weapon to the autoclicker.
+        
+        Args:
+            weapon_id: ID of the weapon to apply delays for
+        """
+        if weapon_id not in self.weapon_hashes:
+            return
+        
+        delays = self.weapon_hashes[weapon_id]["delays"]
+        weapon_name = self.weapon_hashes[weapon_id]["name"]
+        
+        # Only update if weapon changed
+        if self.current_weapon_id != weapon_id:
+            self.autoclicker.click_down_min = delays["click_down_min"]
+            self.autoclicker.click_down_max = delays["click_down_max"]
+            self.autoclicker.click_up_min = delays["click_up_min"]
+            self.autoclicker.click_up_max = delays["click_up_max"]
+            self.current_weapon_id = weapon_id
+            print(f"Switched to {weapon_name}: delays down={delays['click_down_min']}-{delays['click_down_max']}ms, up={delays['click_up_min']}-{delays['click_up_max']}ms")
 
     def _print_region_info(self) -> None:
         """Print region information for debugging."""
@@ -420,9 +544,9 @@ class MacroActivator:
 
     def _validate_setup(self) -> bool:
         """Validate that required templates and drivers are available."""
-        if self.weapon_hash is None:
-            print("ERROR: No weapon template loaded!", file=sys.stderr)
-            print("Use: python main.py --capture-template weapon", file=sys.stderr)
+        if not self.weapon_hashes:
+            print("ERROR: No weapon templates loaded!", file=sys.stderr)
+            print("Add weapon template images (e.g. kettle.png, burletta.png) to the /images folder", file=sys.stderr)
             return False
 
         if not AutoClicker.is_available():
@@ -446,17 +570,25 @@ class MacroActivator:
         print(f"Menu region: {self.menu_region}")
         print(f"Loop delay: {loop_delay}s")
         print(f"Hash threshold: {self.detector.hash_threshold}")
-        print(f"Weapon hash (used for both slots): {self.weapon_hash}")
+        
+        # Print loaded weapons
+        if self.weapon_hashes:
+            print(f"\n✓ Loaded {len(self.weapon_hashes)} weapon(s):")
+            for weapon_id, weapon_data in self.weapon_hashes.items():
+                delays = weapon_data["delays"]
+                print(f"  - {weapon_data['name']}: down={delays['click_down_min']}-{delays['click_down_max']}ms, up={delays['click_up_min']}-{delays['click_up_max']}ms")
+        else:
+            print("\n⚠ No weapons loaded! Add weapon templates to /images folder.")
         
         if self.menu_hash:
-            print(f"Menu hash: {self.menu_hash}")
-            print("\n✓ Menu detection ENABLED - macro will pause when Q menu is open")
+            print(f"\n✓ Menu detection ENABLED - macro will pause when Q menu is open")
         else:
             print("\n⚠ Menu detection DISABLED - no menu template loaded")
         
-        print(f"Debug mode: {debug}")
+        print(f"\nDebug mode: {debug}")
         print("\nLogic: Macro ON only if weapon equipped AND menu closed")
         print("Auto-click: Hold LEFT MOUSE BUTTON to auto-fire when macro is active")
+        print("Delays are automatically applied based on detected weapon")
         print("Mouse listener: ACTIVE (tracking physical button state)")
         print("Press Ctrl+C to stop\n")
 
@@ -474,11 +606,11 @@ class MacroActivator:
         return last_shown_title
 
     def _perform_detection(self, debug: bool) -> Tuple[bool, bool]:
-        """Perform weapon and menu detection."""
+        """Perform weapon and menu detection using multi-weapon system."""
         weapon_img = self.detector.capture_region(self.weapon_region)
         weapon_alt_img = (
             self.detector.capture_region(self.weapon_region_alt)
-            if self.weapon_alt_hash
+            if self.weapon_hashes
             else None
         )
         menu_img = (
@@ -490,18 +622,48 @@ class MacroActivator:
         if weapon_img is None:
             return False, False
 
-        weapon_detected, weapon_distance = self.detector.detect_hash(
-            weapon_img, self.weapon_hash, debug=debug
-        )
-
-        weapon_alt_detected = False
-        weapon_alt_distance = 999
-        if weapon_alt_img is not None and self.weapon_alt_hash is not None:
-            weapon_alt_detected, weapon_alt_distance = self.detector.detect_hash(
-                weapon_alt_img, self.weapon_alt_hash, debug=debug
-            )
-
-        weapon_detected = weapon_detected or weapon_alt_detected
+        # Detect weapon in slot 2
+        weapon_detected_slot2, weapon_id_slot2, distance_slot2 = self.detect_weapon(weapon_img)
+        
+        # Detect weapon in slot 1 (alternative position)
+        weapon_detected_slot1 = False
+        weapon_id_slot1 = None
+        distance_slot1 = 999
+        if weapon_alt_img is not None:
+            weapon_detected_slot1, weapon_id_slot1, distance_slot1 = self.detect_weapon(weapon_alt_img)
+        
+        # Use the best match (lowest distance)
+        weapon_detected = False
+        detected_weapon_id = None
+        best_distance = 999
+        
+        if weapon_detected_slot2 and weapon_detected_slot1:
+            # Both detected - use the one with lower distance
+            if distance_slot2 <= distance_slot1:
+                weapon_detected = True
+                detected_weapon_id = weapon_id_slot2
+                best_distance = distance_slot2
+            else:
+                weapon_detected = True
+                detected_weapon_id = weapon_id_slot1
+                best_distance = distance_slot1
+        elif weapon_detected_slot2:
+            weapon_detected = True
+            detected_weapon_id = weapon_id_slot2
+            best_distance = distance_slot2
+        elif weapon_detected_slot1:
+            weapon_detected = True
+            detected_weapon_id = weapon_id_slot1
+            best_distance = distance_slot1
+        else:
+            best_distance = min(distance_slot2, distance_slot1)
+        
+        # Apply delays for detected weapon
+        if weapon_detected and detected_weapon_id:
+            self.apply_weapon_delays(detected_weapon_id)
+        
+        # Store detected weapon ID for external access
+        self.detected_weapon_id = detected_weapon_id
 
         menu_detected = False
         menu_distance = 999
@@ -511,11 +673,9 @@ class MacroActivator:
             )
 
         if debug:
-            weapon_dist_str = f"dist={weapon_distance}"
-            if weapon_alt_img is not None and self.weapon_alt_hash is not None:
-                weapon_dist_str += f"/alt={weapon_alt_distance}"
+            weapon_name = self.weapon_hashes.get(detected_weapon_id, {}).get("name", "None") if detected_weapon_id else "None"
             print(
-                f"Weapon: {weapon_dist_str}, detected={weapon_detected} | "
+                f"Weapon: {weapon_name} (slot2={distance_slot2}, slot1={distance_slot1}), detected={weapon_detected} | "
                 f"Menu: dist={menu_distance}, detected={menu_detected} | "
                 f"Left btn: {self.autoclicker.left_button_pressed} | "
                 f"Auto-click: {self.autoclicker.autoclick_running}"
