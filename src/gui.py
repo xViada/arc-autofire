@@ -27,6 +27,7 @@ from pynput.keyboard import Key, KeyCode
 import pystray
 
 from .config_manager import ConfigManager
+from .config import FALLBACK_DELAYS
 from .macro_activator import MacroActivator
 from .window_detection import clean_window_title
 
@@ -397,34 +398,73 @@ class MacroGUI:
         """Create delay configuration widgets for a single weapon."""
         weapon_name = weapon_config.get("name", weapon_id.capitalize())
         enabled = weapon_config.get("enabled", True)
+        profile = weapon_config.get("profile", "custom")
+        default_profiles = weapon_config.get("default_profiles", {})
         delays = weapon_config.get("delays", {})
         
         # Weapon frame
         weapon_frame = ttk.LabelFrame(self.weapons_frame, text=weapon_name, padding=5)
         weapon_frame.pack(fill=tk.X, pady=5, padx=5)
         
+        # Top row: Enabled checkbox and Profile dropdown
+        top_frame = ttk.Frame(weapon_frame)
+        top_frame.grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
+        
         # Enabled checkbox
         enabled_var = tk.BooleanVar(value=enabled)
         enabled_cb = ttk.Checkbutton(
-            weapon_frame, 
+            top_frame, 
             text="Enabled", 
             variable=enabled_var,
             command=lambda wid=weapon_id, var=enabled_var: self._save_weapon_enabled(wid, var.get())
         )
-        enabled_cb.grid(row=0, column=0, sticky=tk.W, padx=5)
+        enabled_cb.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Build profile options from default_profiles + "Custom"
+        # Format: {display_name: profile_key}
+        profile_options = {}
+        for profile_key, profile_data in default_profiles.items():
+            display_name = profile_data.get("name", profile_key.capitalize())
+            profile_options[display_name] = profile_key
+        profile_options["Custom"] = "custom"
+        
+        # Get current display name for profile
+        current_display = "Custom"
+        for display_name, profile_key in profile_options.items():
+            if profile_key == profile:
+                current_display = display_name
+                break
+        
+        # Profile dropdown
+        ttk.Label(top_frame, text="Profile:").pack(side=tk.LEFT)
+        profile_var = tk.StringVar(value=current_display)
+        profile_combo = ttk.Combobox(
+            top_frame, 
+            textvariable=profile_var, 
+            values=list(profile_options.keys()),
+            state="readonly",
+            width=10
+        )
+        profile_combo.pack(side=tk.LEFT, padx=5)
+        
+        # Get current delays based on profile
+        if profile in default_profiles:
+            current_delays = default_profiles[profile].get("delays", FALLBACK_DELAYS)
+        else:
+            current_delays = delays if delays else FALLBACK_DELAYS
         
         # Click Down Delay
         down_frame = ttk.Frame(weapon_frame)
         down_frame.grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
         ttk.Label(down_frame, text="Down:").pack(side=tk.LEFT)
         
-        down_min_var = tk.StringVar(value=str(delays.get("click_down_min", 54)))
+        down_min_var = tk.StringVar(value=str(current_delays.get("click_down_min", 54)))
         down_min_entry = ttk.Entry(down_frame, textvariable=down_min_var, width=5)
         down_min_entry.pack(side=tk.LEFT, padx=2)
         
         ttk.Label(down_frame, text="-").pack(side=tk.LEFT)
         
-        down_max_var = tk.StringVar(value=str(delays.get("click_down_max", 64)))
+        down_max_var = tk.StringVar(value=str(current_delays.get("click_down_max", 64)))
         down_max_entry = ttk.Entry(down_frame, textvariable=down_max_var, width=5)
         down_max_entry.pack(side=tk.LEFT, padx=2)
         
@@ -433,26 +473,45 @@ class MacroGUI:
         up_frame.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
         ttk.Label(up_frame, text="Up:").pack(side=tk.LEFT)
         
-        up_min_var = tk.StringVar(value=str(delays.get("click_up_min", 54)))
+        up_min_var = tk.StringVar(value=str(current_delays.get("click_up_min", 54)))
         up_min_entry = ttk.Entry(up_frame, textvariable=up_min_var, width=5)
         up_min_entry.pack(side=tk.LEFT, padx=2)
         
         ttk.Label(up_frame, text="-").pack(side=tk.LEFT)
         
-        up_max_var = tk.StringVar(value=str(delays.get("click_up_max", 64)))
+        up_max_var = tk.StringVar(value=str(current_delays.get("click_up_max", 64)))
         up_max_entry = ttk.Entry(up_frame, textvariable=up_max_var, width=5)
         up_max_entry.pack(side=tk.LEFT, padx=2)
         
-        # Store variables
+        # Store entry widgets for enabling/disabling
+        delay_entries = [down_min_entry, down_max_entry, up_min_entry, up_max_entry]
+        
+        # Set initial state based on profile (disabled if using a default profile)
+        is_custom = profile == "custom" or profile not in default_profiles
+        entry_state = "normal" if is_custom else "disabled"
+        for entry in delay_entries:
+            entry.config(state=entry_state)
+        
+        # Store variables and profile options mapping
         self.weapon_delay_vars[weapon_id] = {
             "enabled": enabled_var,
+            "profile": profile_var,
+            "profile_options": profile_options,
+            "default_profiles": default_profiles,
             "down_min": down_min_var,
             "down_max": down_max_var,
             "up_min": up_min_var,
             "up_max": up_max_var,
+            "entries": delay_entries,
         }
         
-        # Bind trace for auto-save
+        # Profile change handler
+        def on_profile_change(event, wid=weapon_id):
+            self._on_profile_change(wid)
+        
+        profile_combo.bind("<<ComboboxSelected>>", on_profile_change)
+        
+        # Bind trace for auto-save (only for custom profile)
         for var_name, var in [("down_min", down_min_var), ("down_max", down_max_var), 
                               ("up_min", up_min_var), ("up_max", up_max_var)]:
             var.trace("w", lambda *args, wid=weapon_id: self._save_weapon_delays(wid))
@@ -460,6 +519,44 @@ class MacroGUI:
     def _save_weapon_enabled(self, weapon_id: str, enabled: bool):
         """Save weapon enabled state."""
         self.config_manager.set(f"weapons.{weapon_id}.enabled", enabled)
+        self.config_manager.save()
+    
+    def _on_profile_change(self, weapon_id: str):
+        """Handle profile change for a weapon."""
+        if weapon_id not in self.weapon_delay_vars:
+            return
+        
+        vars_dict = self.weapon_delay_vars[weapon_id]
+        display_name = vars_dict["profile"].get()
+        profile_options = vars_dict.get("profile_options", {})
+        default_profiles = vars_dict.get("default_profiles", {})
+        entries = vars_dict.get("entries", [])
+        
+        # Get profile key from display name
+        profile_key = profile_options.get(display_name, "custom")
+        
+        # Save the profile key
+        self.config_manager.set(f"weapons.{weapon_id}.profile", profile_key)
+        
+        if profile_key in default_profiles:
+            # Set values from default profile and disable entries
+            profile_delays = default_profiles[profile_key].get("delays", FALLBACK_DELAYS)
+            vars_dict["down_min"].set(str(profile_delays.get("click_down_min", 54)))
+            vars_dict["down_max"].set(str(profile_delays.get("click_down_max", 64)))
+            vars_dict["up_min"].set(str(profile_delays.get("click_up_min", 54)))
+            vars_dict["up_max"].set(str(profile_delays.get("click_up_max", 64)))
+            for entry in entries:
+                entry.config(state="disabled")
+        else:
+            # Custom profile - enable entries and load saved custom values
+            custom_delays = self.config_manager.get(f"weapons.{weapon_id}.delays", FALLBACK_DELAYS)
+            vars_dict["down_min"].set(str(custom_delays.get("click_down_min", 54)))
+            vars_dict["down_max"].set(str(custom_delays.get("click_down_max", 64)))
+            vars_dict["up_min"].set(str(custom_delays.get("click_up_min", 54)))
+            vars_dict["up_max"].set(str(custom_delays.get("click_up_max", 64)))
+            for entry in entries:
+                entry.config(state="normal")
+        
         self.config_manager.save()
     
     def _save_weapon_delays(self, weapon_id: str):

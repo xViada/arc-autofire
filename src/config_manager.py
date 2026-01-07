@@ -18,6 +18,7 @@ from .config import (
     AUTOCLICK_UP_DELAY_MIN,
     AUTOCLICK_UP_DELAY_MAX,
     DEFAULT_WEAPONS,
+    FALLBACK_DELAYS,
 )
 
 
@@ -84,22 +85,28 @@ class ConfigManager:
         return enabled
     
     def get_weapon_delays(self, weapon_id: str) -> Dict[str, int]:
-        """Get delay configuration for a specific weapon."""
+        """Get delay configuration for a specific weapon.
+        
+        Returns delays based on the selected profile:
+        - If profile matches a key in default_profiles, returns those delays
+        - If profile is "custom", returns the weapon's custom delays
+        - Falls back to FALLBACK_DELAYS if nothing found
+        """
         weapons = self.get("weapons", DEFAULT_WEAPONS)
         if weapon_id in weapons:
-            return weapons[weapon_id].get("delays", {
-                "click_down_min": AUTOCLICK_DOWN_DELAY_MIN,
-                "click_down_max": AUTOCLICK_DOWN_DELAY_MAX,
-                "click_up_min": AUTOCLICK_UP_DELAY_MIN,
-                "click_up_max": AUTOCLICK_UP_DELAY_MAX,
-            })
-        # Return default delays if weapon not found
-        return {
-            "click_down_min": AUTOCLICK_DOWN_DELAY_MIN,
-            "click_down_max": AUTOCLICK_DOWN_DELAY_MAX,
-            "click_up_min": AUTOCLICK_UP_DELAY_MIN,
-            "click_up_max": AUTOCLICK_UP_DELAY_MAX,
-        }
+            weapon_config = weapons[weapon_id]
+            profile = weapon_config.get("profile", "custom")
+            default_profiles = weapon_config.get("default_profiles", {})
+            
+            # Check if profile is a default profile
+            if profile in default_profiles:
+                return default_profiles[profile].get("delays", FALLBACK_DELAYS.copy())
+            
+            # Otherwise use custom delays
+            return weapon_config.get("delays", FALLBACK_DELAYS.copy())
+        
+        # Return fallback delays if weapon not found
+        return FALLBACK_DELAYS.copy()
     
     def load(self) -> Dict[str, Any]:
         """

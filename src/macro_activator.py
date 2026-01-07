@@ -30,6 +30,7 @@ from .config import (
     DEBUG_MENU_FILENAME,
     EXCLUDED_WINDOW_KEYWORDS,
     DEFAULT_WEAPONS,
+    FALLBACK_DELAYS,
     AUTOCLICK_DOWN_DELAY_MIN,
     AUTOCLICK_DOWN_DELAY_MAX,
     AUTOCLICK_UP_DELAY_MIN,
@@ -123,7 +124,7 @@ class MacroActivator:
         Load all enabled weapon templates and their configurations.
         
         Returns:
-            Dictionary mapping weapon_id to {hash, name, delays}
+            Dictionary mapping weapon_id to {hash, name, delays, profile}
         """
         weapon_hashes = {}
         
@@ -149,21 +150,27 @@ class MacroActivator:
                 continue
             
             weapon_name = weapon_config.get("name", weapon_id.capitalize())
-            delays = weapon_config.get("delays", {
-                "click_down_min": AUTOCLICK_DOWN_DELAY_MIN,
-                "click_down_max": AUTOCLICK_DOWN_DELAY_MAX,
-                "click_up_min": AUTOCLICK_UP_DELAY_MIN,
-                "click_up_max": AUTOCLICK_UP_DELAY_MAX,
-            })
+            profile = weapon_config.get("profile", "custom")
+            default_profiles = weapon_config.get("default_profiles", {})
+            
+            # Get delays based on profile
+            if profile in default_profiles:
+                delays = default_profiles[profile].get("delays", FALLBACK_DELAYS.copy())
+                profile_display = default_profiles[profile].get("name", profile.capitalize())
+            else:
+                delays = weapon_config.get("delays", FALLBACK_DELAYS.copy())
+                profile_display = "Custom"
             
             weapon_hashes[weapon_id] = {
                 "hash": template_hash,
                 "name": weapon_name,
                 "delays": delays,
+                "profile": profile,
             }
             
             print(f"Loaded weapon '{weapon_name}' ({template_name}): {template_img.shape[1]}x{template_img.shape[0]} px")
             print(f"  Hash: {template_hash}")
+            print(f"  Profile: {profile_display}")
             print(f"  Delays: down={delays['click_down_min']}-{delays['click_down_max']}ms, up={delays['click_up_min']}-{delays['click_up_max']}ms")
         
         if not weapon_hashes:

@@ -21,6 +21,14 @@ AUTOCLICK_DOWN_DELAY_MAX = 64
 AUTOCLICK_UP_DELAY_MIN = 54
 AUTOCLICK_UP_DELAY_MAX = 64
 
+# Fallback delays - used when no profile is available
+FALLBACK_DELAYS = {
+    "click_down_min": 54,
+    "click_down_max": 64,
+    "click_up_min": 54,
+    "click_up_max": 64,
+}
+
 # Template filenames (legacy - kept for backwards compatibility)
 WEAPON_TEMPLATE_NAME = "weapon.png"
 MENU_TEMPLATE_NAME = "menu.png"
@@ -30,13 +38,30 @@ DEBUG_WEAPON_FILENAME = "debug_weapon.png"
 DEBUG_MENU_FILENAME = "debug_menu.png"
 
 # Weapon configurations with individual delay settings
-# Each weapon has: name, template_file, and delay settings (ms)
-# Delays can be customized per weapon for optimal fire rate
+# Each weapon has:
+#   - name: Display name
+#   - template: Template image filename
+#   - enabled: Whether the weapon is active
+#   - profile: Currently selected profile (key from default_profiles or "custom")
+#   - default_profiles: Predefined profiles with optimized delays (can have multiple)
+#   - delays: Custom delays (used when profile is "custom")
 DEFAULT_WEAPONS = {
     "kettle": {
         "name": "Kettle",
         "template": "kettle.png",
         "enabled": True,
+        "profile": "optimal",
+        "default_profiles": {
+            "optimal": {
+                "name": "Optimal",
+                "delays": {
+                    "click_down_min": 33,
+                    "click_down_max": 37,
+                    "click_up_min": 33,
+                    "click_up_max": 37,
+                }
+            },
+        },
         "delays": {
             "click_down_min": 33,
             "click_down_max": 37,
@@ -48,6 +73,18 @@ DEFAULT_WEAPONS = {
         "name": "Burletta",
         "template": "burletta.png",
         "enabled": True,
+        "profile": "optimal",
+        "default_profiles": {
+            "optimal": {
+                "name": "Optimal",
+                "delays": {
+                    "click_down_min": 27,
+                    "click_down_max": 33,
+                    "click_up_min": 27,
+                    "click_up_max": 33,
+                }
+            },
+        },
         "delays": {
             "click_down_min": 33,
             "click_down_max": 37,
