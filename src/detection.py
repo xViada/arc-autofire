@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Optional, Tuple
 import cv2
 import numpy as np
-from PIL import ImageGrab, Image
+from PIL import Image
 import imagehash
+import mss
 
 
 class HashDetector:
@@ -49,7 +50,7 @@ class HashDetector:
     
     def capture_region(self, region: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
         """
-        Capture a specific region from screen.
+        Capture a specific region from screen
         
         Args:
             region: Tuple (left, top, right, bottom)
@@ -58,9 +59,20 @@ class HashDetector:
             Grayscale image array or None if error
         """
         try:
-            img = ImageGrab.grab(bbox=region)
-            img_array = np.array(img)
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            # Convert (left, top, right, bottom) to mss format {left, top, width, height}
+            monitor = {
+                "left": region[0],
+                "top": region[1],
+                "width": region[2] - region[0],
+                "height": region[3] - region[1],
+            }
+            # Use context manager for thread-safety
+            with mss.mss() as sct:
+                sct_img = sct.grab(monitor)
+                # Convert to numpy array (BGRA format)
+                img_array = np.array(sct_img)
+            # Convert BGRA to grayscale
+            gray = cv2.cvtColor(img_array, cv2.COLOR_BGRA2GRAY)
             return gray
         except Exception as e:
             print(f"Region capture error: {e}", file=sys.stderr)
