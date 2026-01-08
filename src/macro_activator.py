@@ -60,6 +60,7 @@ class MacroActivator:
         screen_height: int = DEFAULT_SCREEN_HEIGHT,
         hash_size: int = DEFAULT_HASH_SIZE,
         weapons_config: Optional[dict] = None,
+        error_callback: Optional[callable] = None,
     ):
         """
         Initialize the macro activator.
@@ -74,13 +75,18 @@ class MacroActivator:
             screen_height: Screen height in pixels
             hash_size: Hash size (8, 16, or 32) - larger = more precise
             weapons_config: Dictionary of weapon configurations with delays
+            error_callback: Callback function for error notifications (e.g., Interception driver error)
         """
         self.macro_active = False
         self.screen_width = screen_width
         self.screen_height = screen_height
+        self.error_callback = error_callback
         
         self.detector = HashDetector(hash_threshold=hash_threshold, hash_size=hash_size)
-        self.autoclicker = AutoClicker(macro_active_callback=lambda: self.macro_active)
+        self.autoclicker = AutoClicker(
+            macro_active_callback=lambda: self.macro_active,
+            error_callback=error_callback
+        )
         self.image_dir = self._resolve_image_dir(image_dir)
         self.image_dir.mkdir(exist_ok=True)
 

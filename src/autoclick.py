@@ -37,6 +37,7 @@ class AutoClicker:
         click_down_max: Optional[int] = None,
         click_up_min: Optional[int] = None,
         click_up_max: Optional[int] = None,
+        error_callback: Optional[Callable[[str], None]] = None,
     ):
         """
         Initialize auto-clicker.
@@ -47,8 +48,10 @@ class AutoClicker:
             click_down_max: Maximum delay for click down in ms (default: 64)
             click_up_min: Minimum delay for click up in ms (default: 54)
             click_up_max: Maximum delay for click up in ms (default: 64)
+            error_callback: Callback function to notify errors (e.g., Interception driver error)
         """
         self.macro_active_callback = macro_active_callback
+        self.error_callback = error_callback
         self.autoclick_running = False
         self.autoclick_thread: Optional[threading.Thread] = None
         self.should_stop_autoclick = False
@@ -56,6 +59,7 @@ class AutoClicker:
         self.simulated_presses_pending = 0
         self.simulated_releases_pending = 0
         self._click_lock = threading.Lock()
+        self._interception_error_shown = False  # Flag to show error only once
 
         self.click_down_min = click_down_min or AUTOCLICK_DOWN_DELAY_MIN
         self.click_down_max = click_down_max or AUTOCLICK_DOWN_DELAY_MAX
@@ -109,7 +113,12 @@ class AutoClicker:
             button_down: True for mouse down, False for mouse up
         """
         if not INTERCEPTION_AVAILABLE:
-            print("ERROR: Interception not available", file=sys.stderr)
+            if not self._interception_error_shown:
+                self._interception_error_shown = True
+                error_msg = "Interception module not available. Install with: pip install interception-python"
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+                if self.error_callback:
+                    self.error_callback(error_msg)
             return
 
         try:
@@ -118,7 +127,13 @@ class AutoClicker:
             else:
                 interception.mouse_up("left")
         except Exception as e:
-            print(f"Interception send error: {e}", file=sys.stderr)
+            error_msg = str(e)
+            # Only show error once to avoid spam
+            if not self._interception_error_shown:
+                self._interception_error_shown = True
+                print(f"Interception send error: {error_msg}", file=sys.stderr)
+                if self.error_callback:
+                    self.error_callback(error_msg)
     
     def _autoclick_loop(self) -> None:
         """

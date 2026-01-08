@@ -41,3 +41,7 @@ Thumbs.db
 
 # Local configuration
 config.json
+
+# Local images
+images/detection_preview.png
+images/detection_preview_step1.png

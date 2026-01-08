@@ -700,13 +700,26 @@ class MacroGUI:
             project_root = script_dir.parent
             image_dir = project_root / "images"
             
-            weapon_template_path = image_dir / "weapon.png"
+            # Find the first enabled weapon template
+            weapons_config = self.config_manager.get("weapons", {})
+            weapon_template_path = None
+            weapon_template_name = None
+            
+            for weapon_id, weapon_data in weapons_config.items():
+                if weapon_data.get("enabled", True):
+                    template_name = weapon_data.get("template", f"{weapon_id}.png")
+                    template_path = image_dir / template_name
+                    if template_path.exists():
+                        weapon_template_path = template_path
+                        weapon_template_name = template_name
+                        break
+            
             menu_template_path = image_dir / "menu.png"
             
             if step == 1:
                 # Step 1: Detect menu and weapon in slot 2
-                if not weapon_template_path.exists():
-                    self.root.after(0, lambda: self._show_detection_error("weapon.png not found in /images"))
+                if weapon_template_path is None:
+                    self.root.after(0, lambda: self._show_detection_error("No enabled weapon template found in /images.\nAdd a weapon with a valid template first."))
                     return
                 
                 if not menu_template_path.exists():
@@ -718,7 +731,7 @@ class MacroGUI:
                 menu_template = cv2.imread(str(menu_template_path), cv2.IMREAD_GRAYSCALE)
                 
                 if weapon_template is None:
-                    self.root.after(0, lambda: self._show_detection_error("Failed to load weapon.png"))
+                    self.root.after(0, lambda msg=weapon_template_name: self._show_detection_error(f"Failed to load {msg}"))
                     return
                 
                 if menu_template is None:
@@ -779,9 +792,9 @@ class MacroGUI:
                 ))
                 
             elif step == 2:
-                # Step 2: Detect weapon in slot 1 using the same weapon.png template
-                if not weapon_template_path.exists():
-                    self.root.after(0, lambda: self._show_detection_error("weapon.png not found in /images"))
+                # Step 2: Detect weapon in slot 1 using the same weapon template
+                if weapon_template_path is None:
+                    self.root.after(0, lambda: self._show_detection_error("No enabled weapon template found in /images.\nAdd a weapon with a valid template first."))
                     return
                 
                 # Use the same weapon template from step 1 if available, otherwise load it
@@ -791,7 +804,7 @@ class MacroGUI:
                     weapon_template = cv2.imread(str(weapon_template_path), cv2.IMREAD_GRAYSCALE)
                 
                 if weapon_template is None:
-                    self.root.after(0, lambda: self._show_detection_error("Failed to load weapon.png"))
+                    self.root.after(0, lambda msg=weapon_template_name: self._show_detection_error(f"Failed to load {msg}"))
                     return
                 
                 # Perform template matching for weapon in slot 1 (same template, different position)
@@ -1638,6 +1651,37 @@ class MacroGUI:
         link_label.bind("<Enter>", lambda e: link_label.config(fg="#0099ff", font=("Arial", 9, "underline")))
         link_label.bind("<Leave>", lambda e: link_label.config(fg="#0066cc", font=("Arial", 9)))
     
+    def _on_interception_error(self, error_message: str):
+        """
+        Handle Interception driver errors by showing a popup notification.
+        Called from a background thread, so we schedule it on the main thread.
+        
+        Args:
+            error_message: The error message from Interception
+        """
+        def show_error_popup():
+            # Stop the macro first
+            self.stop_macro()
+            
+            # Show error popup
+            messagebox.showerror(
+                "Interception Driver Error",
+                f"The Interception driver encountered an error:\n\n{error_message}\n\n"
+                "This usually means the Interception driver is not installed.\n\n"
+                "Installation steps:\n"
+                "1. Download from: https://github.com/oblitum/Interception/releases\n"
+                "2. Run as Administrator: install-interception.exe /install\n"
+                "3. Restart Windows\n"
+                "4. Run: pip install interception-python"
+            )
+            
+            # Update status
+            self.status_label.config(text="Error: Interception driver not installed")
+            self.log(f"Interception error: {error_message}")
+        
+        # Schedule on main thread
+        self.root.after(0, show_error_popup)
+    
     def toggle_macro(self):
         """Toggle macro start/stop."""
         if not self.macro_running:
@@ -1687,6 +1731,7 @@ class MacroGUI:
             screen_height=config["regions"]["screen_resolution"][1],
             hash_size=config["detection"]["hash_size"],
             weapons_config=weapons_config,
+            error_callback=self._on_interception_error,
         )
         
         # Start macro in thread
@@ -2038,4 +2083,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
