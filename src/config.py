@@ -40,7 +40,9 @@ DEBUG_MENU_FILENAME = "debug_menu.png"
 # Weapon configurations with individual delay settings
 # Each weapon has:
 #   - name: Display name
-#   - template: Template image filename
+#   - template: Template image filename (used for both slots if template_slot1/template_slot2 not specified)
+#   - template_slot1: Optional template image filename for slot 1 (falls back to template if not specified)
+#   - template_slot2: Optional template image filename for slot 2 (falls back to template if not specified)
 #   - enabled: Whether the weapon is active
 #   - profile: Currently selected profile (key from default_profiles or "custom")
 #   - default_profiles: Predefined profiles with optimized delays (can have multiple)
@@ -48,48 +50,52 @@ DEBUG_MENU_FILENAME = "debug_menu.png"
 DEFAULT_WEAPONS = {
     "kettle": {
         "name": "Kettle",
-        "template": "kettle.png",
+        "template": "kettle.png",  # Used for both slots if template_slot1/template_slot2 not specified
+        # "template_slot1": "kettle_slot1.png",  # Optional: specific template for slot 1
+        # "template_slot2": "kettle_slot2.png",  # Optional: specific template for slot 2
         "enabled": True,
         "profile": "optimal",
         "default_profiles": {
             "optimal": {
                 "name": "Optimal",
                 "delays": {
-                    "click_down_min": 33,
-                    "click_down_max": 37,
-                    "click_up_min": 33,
-                    "click_up_max": 37,
+                    "click_down_min": 19,
+                    "click_down_max": 23,
+                    "click_up_min": 19,
+                    "click_up_max": 23,
                 }
             },
         },
         "delays": {
-            "click_down_min": 33,
-            "click_down_max": 37,
-            "click_up_min": 33,
-            "click_up_max": 37,
+            "click_down_min": 19,
+            "click_down_max": 23,
+            "click_up_min": 19,
+            "click_up_max": 23,
         }
     },
     "burletta": {
         "name": "Burletta",
-        "template": "burletta.png",
+        "template": "burletta.png",  # Used for both slots if template_slot1/template_slot2 not specified
+        # "template_slot1": "burletta_slot1.png",  # Optional: specific template for slot 1
+        # "template_slot2": "burletta_slot2.png",  # Optional: specific template for slot 2
         "enabled": True,
         "profile": "optimal",
         "default_profiles": {
             "optimal": {
                 "name": "Optimal",
                 "delays": {
-                    "click_down_min": 27,
-                    "click_down_max": 33,
-                    "click_up_min": 27,
-                    "click_up_max": 33,
+                    "click_down_min": 35,
+                    "click_down_max": 38,
+                    "click_up_min": 35,
+                    "click_up_max": 38,
                 }
             },
         },
         "delays": {
-            "click_down_min": 33,
-            "click_down_max": 37,
-            "click_up_min": 33,
-            "click_up_max": 37,
+            "click_down_min": 35,
+            "click_down_max": 38,
+            "click_up_min": 35,
+            "click_up_max": 38,
         }
     },
 }

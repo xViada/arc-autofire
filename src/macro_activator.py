@@ -39,6 +39,7 @@ from .config import (
 from .detection import HashDetector
 from .autoclick import AutoClicker
 from .window_detection import is_game_active, clean_window_title
+from .image_paths import find_template_file, get_image_base_dir
 
 
 class MacroActivator:
@@ -87,6 +88,7 @@ class MacroActivator:
             macro_active_callback=lambda: self.macro_active,
             error_callback=error_callback
         )
+        # Keep image_dir for backwards compatibility, but use organized structure
         self.image_dir = self._resolve_image_dir(image_dir)
         self.image_dir.mkdir(exist_ok=True)
 
@@ -110,8 +112,10 @@ class MacroActivator:
         self.weapon_alt_hash = None
         if self.weapon_hashes:
             first_weapon = next(iter(self.weapon_hashes.values()))
-            self.weapon_hash = first_weapon.get("hash")
-            self.weapon_alt_hash = self.weapon_hash
+            # Use slot 2 hash for legacy compatibility, fallback to slot 1
+            self.weapon_hash = first_weapon.get("hash_slot2") or first_weapon.get("hash_slot1")
+            # Use slot 1 hash for legacy compatibility, fallback to slot 2
+            self.weapon_alt_hash = first_weapon.get("hash_slot1") or first_weapon.get("hash_slot2")
         
         self.menu_hash = self._load_template_hash(MENU_TEMPLATE_NAME, "menu")
 
@@ -128,9 +132,10 @@ class MacroActivator:
     def _load_weapon_templates(self) -> dict:
         """
         Load all enabled weapon templates and their configurations.
+        Supports separate templates for slot 1 and slot 2.
         
         Returns:
-            Dictionary mapping weapon_id to {hash, name, delays, profile}
+            Dictionary mapping weapon_id to {hash_slot1, hash_slot2, name, delays, profile}
         """
         weapon_hashes = {}
         
@@ -138,24 +143,42 @@ class MacroActivator:
             if not weapon_config.get("enabled", True):
                 continue
             
-            template_name = weapon_config.get("template", f"{weapon_id}.png")
-            template_path = self.image_dir / template_name
-            
-            if not template_path.exists():
-                print(f"Weapon template not found: {template_path}")
-                continue
-            
-            template_img = self.detector.load_image(template_path)
-            if template_img is None:
-                print(f"Failed to load weapon template: {template_path}")
-                continue
-            
-            template_hash = self.detector.calculate_hash(template_img)
-            if template_hash is None:
-                print(f"Failed to calculate hash for: {template_path}")
-                continue
-            
             weapon_name = weapon_config.get("name", weapon_id.capitalize())
+            
+            # Get template filenames (support per-slot templates with fallback)
+            template_base = weapon_config.get("template", f"{weapon_id}.png")
+            template_slot1_name = weapon_config.get("template_slot1", template_base)
+            template_slot2_name = weapon_config.get("template_slot2", template_base)
+            
+            # Load slot 1 template (check templates/ and captured/ directories)
+            template_slot1_path = find_template_file(template_slot1_name)
+            template_slot1_hash = None
+            if template_slot1_path:
+                template_slot1_img = self.detector.load_image(template_slot1_path)
+                if template_slot1_img is not None:
+                    template_slot1_hash = self.detector.calculate_hash(template_slot1_img)
+                    if template_slot1_hash is None:
+                        print(f"Failed to calculate hash for slot 1 template: {template_slot1_path}")
+            else:
+                print(f"Weapon template (slot 1) not found: {template_slot1_name}")
+            
+            # Load slot 2 template (check templates/ and captured/ directories)
+            template_slot2_path = find_template_file(template_slot2_name)
+            template_slot2_hash = None
+            if template_slot2_path:
+                template_slot2_img = self.detector.load_image(template_slot2_path)
+                if template_slot2_img is not None:
+                    template_slot2_hash = self.detector.calculate_hash(template_slot2_img)
+                    if template_slot2_hash is None:
+                        print(f"Failed to calculate hash for slot 2 template: {template_slot2_path}")
+            else:
+                print(f"Weapon template (slot 2) not found: {template_slot2_name}")
+            
+            # Skip if no templates loaded
+            if template_slot1_hash is None and template_slot2_hash is None:
+                print(f"Skipping weapon '{weapon_name}': No valid templates found")
+                continue
+            
             profile = weapon_config.get("profile", "custom")
             default_profiles = weapon_config.get("default_profiles", {})
             
@@ -168,14 +191,23 @@ class MacroActivator:
                 profile_display = "Custom"
             
             weapon_hashes[weapon_id] = {
-                "hash": template_hash,
+                "hash_slot1": template_slot1_hash,
+                "hash_slot2": template_slot2_hash,
                 "name": weapon_name,
                 "delays": delays,
                 "profile": profile,
             }
             
-            print(f"Loaded weapon '{weapon_name}' ({template_name}): {template_img.shape[1]}x{template_img.shape[0]} px")
-            print(f"  Hash: {template_hash}")
+            # Print loading info
+            print(f"Loaded weapon '{weapon_name}':")
+            if template_slot1_hash:
+                print(f"  Slot 1: {template_slot1_name} (hash: {template_slot1_hash})")
+            if template_slot2_hash:
+                print(f"  Slot 2: {template_slot2_name} (hash: {template_slot2_hash})")
+            if template_slot1_hash is None:
+                print(f"  Warning: Slot 1 template missing, will use slot 2 template")
+            if template_slot2_hash is None:
+                print(f"  Warning: Slot 2 template missing, will use slot 1 template")
             print(f"  Profile: {profile_display}")
             print(f"  Delays: down={delays['click_down_min']}-{delays['click_down_max']}ms, up={delays['click_up_min']}-{delays['click_up_max']}ms")
         
@@ -186,12 +218,13 @@ class MacroActivator:
         
         return weapon_hashes
     
-    def detect_weapon(self, weapon_img: np.ndarray) -> Tuple[bool, Optional[str], int]:
+    def detect_weapon(self, weapon_img: np.ndarray, slot: int = 1) -> Tuple[bool, Optional[str], int]:
         """
         Detect which weapon (if any) matches the captured image.
         
         Args:
             weapon_img: Captured weapon region image
+            slot: Slot number (1 or 2) to determine which template to use
             
         Returns:
             Tuple (detected: bool, weapon_id: str or None, best_distance: int)
@@ -201,17 +234,43 @@ class MacroActivator:
         
         best_match = None
         best_distance = 999
+        best_distance_overall = 999  # Track best distance even if outside threshold
+        
+        # Determine which hash to use based on slot
+        hash_key = f"hash_slot{slot}"
         
         for weapon_id, weapon_data in self.weapon_hashes.items():
+            # Get the appropriate hash for this slot
+            template_hash = weapon_data.get(hash_key)
+            
+            # Fallback: if slot-specific hash not available, try the other slot's hash
+            if template_hash is None:
+                fallback_key = f"hash_slot{3 - slot}"  # 3-1=2, 3-2=1
+                template_hash = weapon_data.get(fallback_key)
+            
+            # Skip if no hash available
+            if template_hash is None:
+                continue
+            
             detected, distance = self.detector.detect_hash(
-                weapon_img, weapon_data["hash"], debug=False
+                weapon_img, template_hash, debug=False
             )
             
-            if detected and distance < best_distance:
-                best_distance = distance
-                best_match = weapon_id
+            # Track the overall best distance (even if outside threshold)
+            if distance < best_distance_overall:
+                best_distance_overall = distance
+                # If this is the best match and within threshold, use it
+                if detected and distance < best_distance:
+                    best_distance = distance
+                    best_match = weapon_id
         
-        return best_match is not None, best_match, best_distance
+        # If we found a match within threshold, return it
+        if best_match is not None:
+            return True, best_match, best_distance
+        
+        # Otherwise, return the best distance found (even if outside threshold)
+        # This helps with debugging - we can see how close we were
+        return False, None, best_distance_overall
     
     def apply_weapon_delays(self, weapon_id: str) -> None:
         """
@@ -259,7 +318,11 @@ class MacroActivator:
         Returns:
             ImageHash object or None if template not found
         """
-        template_path = self.image_dir / filename
+        template_path = find_template_file(filename)
+        if template_path is None:
+            print(f"No {template_type} template. Use --capture-template {template_type}")
+            return None
+        
         template_img = self.detector.load_image(template_path)
         
         if template_img is None:
@@ -293,7 +356,8 @@ class MacroActivator:
         if region_img is None:
             return False
         
-        path = self.image_dir / filename
+        from .image_paths import get_previews_dir
+        path = get_previews_dir() / filename
         cv2.imwrite(str(path), region_img)
         print(f"Current {region_type} capture saved to: {path}")
         
@@ -470,7 +534,8 @@ class MacroActivator:
             print("✗ Failed to capture region.", file=sys.stderr)
             return False
         
-        template_path = self.image_dir / f"{template_name}.png"
+        from .image_paths import get_captured_dir
+        template_path = get_captured_dir() / f"{template_name}.png"
         cv2.imwrite(str(template_path), region_img)
         
         template_hash = self.detector.calculate_hash(region_img)
@@ -635,15 +700,15 @@ class MacroActivator:
         if weapon_img is None:
             return False, False
 
-        # Detect weapon in slot 2
-        weapon_detected_slot2, weapon_id_slot2, distance_slot2 = self.detect_weapon(weapon_img)
+        # Detect weapon in slot 2 (using slot 2 templates)
+        weapon_detected_slot2, weapon_id_slot2, distance_slot2 = self.detect_weapon(weapon_img, slot=2)
         
-        # Detect weapon in slot 1 (alternative position)
+        # Detect weapon in slot 1 (using slot 1 templates)
         weapon_detected_slot1 = False
         weapon_id_slot1 = None
         distance_slot1 = 999
         if weapon_alt_img is not None:
-            weapon_detected_slot1, weapon_id_slot1, distance_slot1 = self.detect_weapon(weapon_alt_img)
+            weapon_detected_slot1, weapon_id_slot1, distance_slot1 = self.detect_weapon(weapon_alt_img, slot=1)
         
         # Use the best match (lowest distance)
         weapon_detected = False

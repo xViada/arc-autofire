@@ -30,6 +30,16 @@ from .config_manager import ConfigManager
 from .config import FALLBACK_DELAYS
 from .macro_activator import MacroActivator
 from .window_detection import clean_window_title
+from .image_paths import (
+    get_assets_dir,
+    get_templates_dir,
+    get_captured_dir,
+    get_previews_dir,
+    find_template_file,
+    get_captured_path,
+    get_preview_path,
+    get_asset_path
+)
 
 # Constants
 PREVIEW_MAX_WIDTH = 1200
@@ -215,14 +225,14 @@ class RegionSelector:
         
         # Crop and save image
         region_img = self.img.crop((left, top, right, bottom))
-        image_dir = Path(self.screenshot_path).parent
+        # Save to templates directory (default templates)
         if region_type == "weapon":
             filename = "weapon.png"
         elif region_type == "weapon_alt":
             filename = "weapon_alt.png"
         else:
             filename = "menu.png"
-        save_path = image_dir / filename
+        save_path = get_templates_dir() / filename
         region_img.save(save_path)
         
         # Call callback with region coordinates
@@ -279,6 +289,11 @@ class MacroGUI:
         self.alt_pressed = False
         self.ctrl_pressed = False
         self.shift_pressed = False
+        
+        # Template capture state
+        self.template_capture_mode: Optional[str] = None  # "weapon_slot1", "weapon_slot2", "menu"
+        self.template_capture_weapon_id: Optional[str] = None
+        self.template_capture_step = 0  # 0 = not capturing, 1 = slot1, 2 = slot2
 
         # Log queue for thread-safe logging
         self.log_queue = queue.Queue()
@@ -286,7 +301,7 @@ class MacroGUI:
         # Create GUI
         self.root = tk.Tk()
         self.root.title("ARC-AutoFire by xViada")
-        icon_path = Path(__file__).parent.parent / "images" / "icon.ico"
+        icon_path = get_asset_path("icon.ico")
         if icon_path.exists():
             self.root.iconbitmap(str(icon_path.absolute()))
         
@@ -316,7 +331,7 @@ class MacroGUI:
         """Create the UI components."""
         # Notebook for tabs
         notebook = ttk.Notebook(self.root)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
         
         # Tab 1: Delays Configuration
         settings_frame = ttk.Frame(notebook)
@@ -328,12 +343,17 @@ class MacroGUI:
         notebook.add(regions_frame, text="Regions")
         self.create_regions_panel(regions_frame)
         
-        # Tab 3: Keybinds
+        # Tab 3: Templates
+        templates_frame = ttk.Frame(notebook)
+        notebook.add(templates_frame, text="Templates")
+        self.create_templates_panel(templates_frame)
+        
+        # Tab 4: Keybinds
         keybinds_frame = ttk.Frame(notebook)
         notebook.add(keybinds_frame, text="Keybinds")
         self.create_keybinds_panel(keybinds_frame)
         
-        # Tab 4: Status/Logs
+        # Tab 5: Status/Logs
         status_frame = ttk.Frame(notebook)
         notebook.add(status_frame, text="Status")
         self.create_status_panel(status_frame)
@@ -597,6 +617,18 @@ class MacroGUI:
     
     def create_regions_panel(self, parent):
         """Create region setup panel."""
+        # Instructions frame
+        instructions_frame = ttk.LabelFrame(parent, text="Instructions", padding=10)
+        instructions_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        instructions_text = (
+            "1. Use 'Capture Screen' to take a screenshot and manually select regions\n"
+            "2. Use 'Auto-detect Regions' to automatically find regions (2 steps: Slot 1, then Slot 2)\n"
+            "3. Adjust confidence threshold if auto-detection fails\n"
+            "4. Regions are saved automatically when set"
+        )
+        ttk.Label(instructions_frame, text=instructions_text, justify=tk.LEFT).pack(anchor=tk.W)
+        
         frame = ttk.LabelFrame(parent, text="Region Configuration", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -676,10 +708,10 @@ class MacroGUI:
         self.autodetect_btn.config(text="Cancel Auto-detect", state=tk.NORMAL)
         self.capture_btn.config(state=tk.DISABLED)  # Disable capture button while autodetect is waiting
         self.capture_status_label.config(
-            text=f"Step 1/2: Capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
+            text=f"Step 1/2: Capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
             foreground="blue"
         )
-        self.log(f"Auto-detect Step 1/2: Waiting for capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
+        self.log(f"Auto-detect Step 1/2: Waiting for capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
         
         # Start listener for capture keybind
         self.start_capture_listener()
@@ -696,10 +728,6 @@ class MacroGUI:
             screen_img, screen_gray, monitor_info = self._capture_screen_for_detection()
             
             # Load templates
-            script_dir = Path(__file__).parent
-            project_root = script_dir.parent
-            image_dir = project_root / "images"
-            
             # Find the first enabled weapon template
             weapons_config = self.config_manager.get("weapons", {})
             weapon_template_path = None
@@ -708,16 +736,16 @@ class MacroGUI:
             for weapon_id, weapon_data in weapons_config.items():
                 if weapon_data.get("enabled", True):
                     template_name = weapon_data.get("template", f"{weapon_id}.png")
-                    template_path = image_dir / template_name
-                    if template_path.exists():
+                    template_path = find_template_file(template_name)
+                    if template_path:
                         weapon_template_path = template_path
                         weapon_template_name = template_name
                         break
             
-            menu_template_path = image_dir / "menu.png"
+            menu_template_path = find_template_file("menu.png")
             
             if step == 1:
-                # Step 1: Detect menu and weapon in slot 2
+                # Step 1: Detect menu and weapon in slot 1
                 if weapon_template_path is None:
                     self.root.after(0, lambda: self._show_detection_error("No enabled weapon template found in /images.\nAdd a weapon with a valid template first."))
                     return
@@ -750,13 +778,13 @@ class MacroGUI:
                 weapon_found = weapon_max_val >= confidence_threshold
                 menu_found = menu_max_val >= confidence_threshold
                 
-                # Calculate regions
-                weapon_region = None
+                # Calculate regions (slot 1 stored as weapon_alt_region, will be saved to regions.weapon)
+                weapon_alt_region = None
                 menu_region = None
                 
                 if weapon_found:
                     h, w = weapon_template.shape
-                    weapon_region = (
+                    weapon_alt_region = (
                         weapon_max_loc[0],
                         weapon_max_loc[1],
                         weapon_max_loc[0] + w,
@@ -774,9 +802,9 @@ class MacroGUI:
                 
                 # Store results for step 2
                 self.first_capture_results = {
-                    'weapon_found': weapon_found,
-                    'weapon_region': weapon_region,
-                    'weapon_confidence': weapon_max_val,
+                    'weapon_alt_found': weapon_found,
+                    'weapon_alt_region': weapon_alt_region,
+                    'weapon_alt_confidence': weapon_max_val,
                     'menu_found': menu_found,
                     'menu_region': menu_region,
                     'menu_confidence': menu_max_val,
@@ -787,12 +815,12 @@ class MacroGUI:
                 
                 # Show results and ask for step 2
                 self.root.after(0, lambda: self._show_step1_results(
-                    screen_img, weapon_found, weapon_region, weapon_max_val,
+                    screen_img, weapon_found, weapon_alt_region, weapon_max_val,
                     menu_found, menu_region, menu_max_val, confidence_threshold, monitor_info
                 ))
                 
             elif step == 2:
-                # Step 2: Detect weapon in slot 1 using the same weapon template
+                # Step 2: Detect weapon in slot 2 using the same weapon template
                 if weapon_template_path is None:
                     self.root.after(0, lambda: self._show_detection_error("No enabled weapon template found in /images.\nAdd a weapon with a valid template first."))
                     return
@@ -807,34 +835,34 @@ class MacroGUI:
                     self.root.after(0, lambda msg=weapon_template_name: self._show_detection_error(f"Failed to load {msg}"))
                     return
                 
-                # Perform template matching for weapon in slot 1 (same template, different position)
-                weapon_alt_result = cv2.matchTemplate(screen_gray, weapon_template, cv2.TM_CCOEFF_NORMED)
-                _, weapon_alt_max_val, _, weapon_alt_max_loc = cv2.minMaxLoc(weapon_alt_result)
+                # Perform template matching for weapon in slot 2 (same template, different position)
+                weapon_result = cv2.matchTemplate(screen_gray, weapon_template, cv2.TM_CCOEFF_NORMED)
+                _, weapon_max_val, _, weapon_max_loc = cv2.minMaxLoc(weapon_result)
                 
                 # Check if found with sufficient confidence
-                weapon_alt_found = weapon_alt_max_val >= confidence_threshold
+                weapon_found = weapon_max_val >= confidence_threshold
                 
-                # Calculate region
-                weapon_alt_region = None
-                if weapon_alt_found:
+                # Calculate region (slot 2 stored as weapon_region, will be saved to regions.weapon_alt)
+                weapon_region = None
+                if weapon_found:
                     h, w = weapon_template.shape
-                    weapon_alt_region = (
-                        weapon_alt_max_loc[0],
-                        weapon_alt_max_loc[1],
-                        weapon_alt_max_loc[0] + w,
-                        weapon_alt_max_loc[1] + h
+                    weapon_region = (
+                        weapon_max_loc[0],
+                        weapon_max_loc[1],
+                        weapon_max_loc[0] + w,
+                        weapon_max_loc[1] + h
                     )
                 
                 # Combine results from both steps
                 if self.first_capture_results:
                     self.root.after(0, lambda: self._show_final_detection_results(
                         self.first_capture_results['screen_img'],
-                        self.first_capture_results['weapon_found'],
-                        self.first_capture_results['weapon_region'],
-                        self.first_capture_results['weapon_confidence'],
-                        weapon_alt_found,
-                        weapon_alt_region,
-                        weapon_alt_max_val,
+                        weapon_found,
+                        weapon_region,
+                        weapon_max_val,
+                        self.first_capture_results['weapon_alt_found'],
+                        self.first_capture_results['weapon_alt_region'],
+                        self.first_capture_results['weapon_alt_confidence'],
                         self.first_capture_results['menu_found'],
                         self.first_capture_results['menu_region'],
                         self.first_capture_results['menu_confidence'],
@@ -880,13 +908,21 @@ class MacroGUI:
         # Both found - show preview and ask for step 2
         preview_img = screen_img.copy()
         
-        # Draw weapon region (green)
+        # Draw weapon region (green) - Slot 1
         cv2.rectangle(preview_img, 
                      (weapon_region[0], weapon_region[1]), 
                      (weapon_region[2], weapon_region[3]), 
                      (0, 255, 0), 2)
-        cv2.putText(preview_img, f"Weapon (Slot 2): {weapon_confidence:.1%}", 
-                   (weapon_region[0], weapon_region[1] - 10),
+        # Calculate text position to avoid cutting off on the right side
+        text_slot1 = f"Weapon (Slot 1): {weapon_confidence:.1%}"
+        (text_width_slot1, text_height_slot1), _ = cv2.getTextSize(text_slot1, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        img_width = preview_img.shape[1]
+        text_x_slot1 = weapon_region[0]
+        # If text would go off screen, move it left
+        if text_x_slot1 + text_width_slot1 > img_width:
+            text_x_slot1 = max(0, img_width - text_width_slot1 - 10)
+        cv2.putText(preview_img, text_slot1, 
+                   (text_x_slot1, weapon_region[1] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         # Draw menu region (blue)
@@ -899,10 +935,7 @@ class MacroGUI:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
         
         # Save preview
-        script_dir = Path(__file__).parent
-        project_root = script_dir.parent
-        image_dir = project_root / "images"
-        preview_path = image_dir / "detection_preview_step1.png"
+        preview_path = get_preview_path("detection_preview_step1.png")
         cv2.imwrite(str(preview_path), preview_img)
         
         # Show preview window with step 2 prompt
@@ -911,11 +944,11 @@ class MacroGUI:
         # Continue to step 2
         self.autodetect_step = 2
         self.capture_status_label.config(
-            text=f"Step 2/2: Capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
+            text=f"Step 2/2: Capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
             foreground="blue"
         )
-        self.log(f"Step 1 complete - Weapon (Slot 2): {weapon_confidence:.1%} at {weapon_region}, Menu: {menu_confidence:.1%} at {menu_region}")
-        self.log(f"Step 2/2: Waiting for capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
+        self.log(f"Step 1 complete - Weapon (Slot 1): {weapon_confidence:.1%} at {weapon_region}, Menu: {menu_confidence:.1%} at {menu_region}")
+        self.log(f"Step 2/2: Waiting for capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
         
         # Restart capture listener for step 2
         self.start_capture_listener()
@@ -958,7 +991,7 @@ class MacroGUI:
             ).pack(anchor=tk.W)
             ttk.Label(
                 info_frame,
-                text=f"Weapon Region (Slot 2): {weapon_region} - Confidence: {weapon_confidence:.1%}",
+                text=f"Weapon Region (Slot 1): {weapon_region} - Confidence: {weapon_confidence:.1%}",
             ).pack(anchor=tk.W, padx=20)
             ttk.Label(
                 info_frame,
@@ -967,7 +1000,7 @@ class MacroGUI:
             ttk.Label(info_frame, text="", font=("Arial", 10)).pack()
             ttk.Label(
                 info_frame,
-                text="Next: Capture screen with weapon in Slot 1",
+                text="Next: Capture screen with weapon in Slot 2",
                 font=("Arial", 10, "bold"),
                 foreground="blue",
             ).pack(anchor=tk.W, padx=20)
@@ -1038,19 +1071,21 @@ class MacroGUI:
         self.ctrl_pressed = False
         self.shift_pressed = False
         
-        # Check if weapon_alt was found
-        if not weapon_alt_found:
+        # Check if weapon (slot 2) was found
+        if not weapon_found:
             self.capture_status_label.config(
-                text=f"Step 2: Weapon (Slot 1) not found (confidence: {weapon_alt_confidence:.2%}, threshold: {threshold:.2%})",
+                text=f"Step 2: Weapon (Slot 2) not found (confidence: {weapon_confidence:.2%}, threshold: {threshold:.2%})",
                 foreground="orange"
             )
-            self.log(f"Step 2: Weapon (Slot 1) not found. Confidence: {weapon_alt_confidence:.2%}, Threshold: {threshold:.2%}")
-            # Continue anyway with just slot 2
+            self.log(f"Step 2: Weapon (Slot 2) not found. Confidence: {weapon_confidence:.2%}, Threshold: {threshold:.2%}")
+            # Continue anyway with just slot 1
         
-        # Update regions
-        self.config_manager.set("regions.weapon", list(weapon_region))
+        # Update regions (weapon_alt is slot 2, weapon is slot 1)
+        # weapon_alt_region is slot 1 (from step 1), weapon_region is slot 2 (from step 2)
         if weapon_alt_region:
-            self.config_manager.set("regions.weapon_alt", list(weapon_alt_region))
+            self.config_manager.set("regions.weapon", list(weapon_alt_region))  # slot 1
+        if weapon_region:
+            self.config_manager.set("regions.weapon_alt", list(weapon_region))  # slot 2
         self.config_manager.set("regions.menu", list(menu_region))
         
         # Update screen resolution
@@ -1067,8 +1102,16 @@ class MacroGUI:
                      (weapon_region[0], weapon_region[1]), 
                      (weapon_region[2], weapon_region[3]), 
                      (0, 255, 0), 2)
-        cv2.putText(preview_img, f"Weapon (Slot 2): {weapon_confidence:.1%}", 
-                   (weapon_region[0], weapon_region[1] - 10),
+        # Calculate text position to avoid cutting off on the right side
+        text_slot2 = f"Weapon (Slot 2): {weapon_confidence:.1%}"
+        (text_width_slot2, text_height_slot2), _ = cv2.getTextSize(text_slot2, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        img_width = preview_img.shape[1]
+        text_x_slot2 = weapon_region[0]
+        # If text would go off screen, move it left
+        if text_x_slot2 + text_width_slot2 > img_width:
+            text_x_slot2 = max(0, img_width - text_width_slot2 - 10)
+        cv2.putText(preview_img, text_slot2, 
+                   (text_x_slot2, weapon_region[1] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         # Draw weapon region slot 1 if found (yellow)
@@ -1077,8 +1120,15 @@ class MacroGUI:
                          (weapon_alt_region[0], weapon_alt_region[1]),
                          (weapon_alt_region[2], weapon_alt_region[3]),
                          (0, 255, 255), 2)
-            cv2.putText(preview_img, f"Weapon (Slot 1): {weapon_alt_confidence:.1%}",
-                       (weapon_alt_region[0], weapon_alt_region[1] - 10),
+            # Calculate text position to avoid cutting off on the right side
+            text_slot1 = f"Weapon (Slot 1): {weapon_alt_confidence:.1%}"
+            (text_width_slot1, text_height_slot1), _ = cv2.getTextSize(text_slot1, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            text_x_slot1 = weapon_alt_region[0]
+            # If text would go off screen, move it left
+            if text_x_slot1 + text_width_slot1 > img_width:
+                text_x_slot1 = max(0, img_width - text_width_slot1 - 10)
+            cv2.putText(preview_img, text_slot1,
+                       (text_x_slot1, weapon_alt_region[1] - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
         # Draw menu region (blue)
@@ -1091,10 +1141,7 @@ class MacroGUI:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
         
         # Save preview
-        script_dir = Path(__file__).parent
-        project_root = script_dir.parent
-        image_dir = project_root / "images"
-        preview_path = image_dir / "detection_preview.png"
+        preview_path = get_preview_path("detection_preview.png")
         cv2.imwrite(str(preview_path), preview_img)
         
         # Show preview window
@@ -1250,7 +1297,7 @@ class MacroGUI:
         self.log("Capture cancelled")
     
     def start_capture_listener(self):
-        """Start listener for capture keybind."""
+        """Start listener for capture keybind (regions tab)."""
         if self.capture_listener:
             self.capture_listener.stop()
         
@@ -1261,6 +1308,10 @@ class MacroGUI:
         main_key = parts[-1].strip() if parts else "P"
         
         def on_press(key):
+            # Don't interfere with template capture
+            if self.template_capture_mode is not None:
+                return
+            
             if not self.waiting_for_capture:
                 return
             
@@ -1389,11 +1440,7 @@ class MacroGUI:
         img = Image.fromarray(cv2.cvtColor(screen_img, cv2.COLOR_BGR2RGB))
         
         # Save temporary screenshot
-        script_dir = Path(__file__).parent
-        project_root = script_dir.parent
-        image_dir = project_root / "images"
-        image_dir.mkdir(exist_ok=True)
-        screenshot_path = image_dir / "temp_screenshot.png"
+        screenshot_path = get_preview_path("temp_screenshot.png")
         img.save(screenshot_path)
         
         # Reset status
@@ -1448,6 +1495,445 @@ class MacroGUI:
         # Restore GUI
         self.root.deiconify()
         self.root.lift()
+    
+    def create_templates_panel(self, parent):
+        """Create template capture panel."""
+        # Instructions frame
+        instructions_frame = ttk.LabelFrame(parent, text="Instructions", padding=10)
+        instructions_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        instructions_text = (
+            "1. Make sure regions are configured in the Regions tab\n"
+            "2. Click 'Capture Weapon Templates' for a weapon (2 steps: Slot 1, then Slot 2)\n"
+            "3. Click 'Capture Menu Template' for the quick menu (1 step)\n"
+            "4. Press ALT+P when ready to capture each template\n"
+            "5. Templates will be saved automatically to the /images folder"
+        )
+        ttk.Label(instructions_frame, text=instructions_text, justify=tk.LEFT).pack(anchor=tk.W)
+        
+        # Status label
+        self.template_status_label = ttk.Label(instructions_frame, text="", foreground="blue")
+        self.template_status_label.pack(anchor=tk.W, pady=(10, 0))
+        
+        # Weapons templates frame
+        weapons_frame = ttk.LabelFrame(parent, text="Weapon Templates", padding=10)
+        weapons_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create scrollable canvas for weapons
+        canvas = tk.Canvas(weapons_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(weapons_frame, orient="vertical", command=canvas.yview)
+        self.weapons_templates_frame = ttk.Frame(canvas)
+        
+        self.weapons_templates_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=self.weapons_templates_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Store weapon template buttons
+        self.weapon_template_buttons = {}
+        
+        # Get weapons from config
+        weapons = self.config_manager.get("weapons", {})
+        
+        for idx, (weapon_id, weapon_config) in enumerate(weapons.items()):
+            self._create_weapon_template_widgets(weapon_id, weapon_config, idx)
+        
+        # Menu template frame
+        menu_frame = ttk.LabelFrame(parent, text="Menu Template", padding=10)
+        menu_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        menu_info_frame = ttk.Frame(menu_frame)
+        menu_info_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(menu_info_frame, text="Quick Menu Template:").pack(side=tk.LEFT, padx=5)
+        self.menu_template_status = ttk.Label(menu_info_frame, text="Not captured", foreground="gray")
+        self.menu_template_status.pack(side=tk.LEFT, padx=5)
+        
+        menu_buttons_frame = ttk.Frame(menu_frame)
+        menu_buttons_frame.pack(pady=5)
+        
+        self.capture_menu_btn = ttk.Button(
+            menu_buttons_frame,
+            text="Capture Menu Template",
+            command=lambda: self.start_menu_template_capture()
+        )
+        self.capture_menu_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.cancel_menu_btn = ttk.Button(
+            menu_buttons_frame,
+            text="Cancel",
+            command=self.cancel_template_capture,
+            state=tk.DISABLED
+        )
+        self.cancel_menu_btn.pack(side=tk.LEFT, padx=5)
+    
+    def _create_weapon_template_widgets(self, weapon_id: str, weapon_config: dict, row_idx: int):
+        """Create template capture widgets for a single weapon."""
+        weapon_name = weapon_config.get("name", weapon_id.capitalize())
+        
+        # Weapon frame
+        weapon_frame = ttk.LabelFrame(self.weapons_templates_frame, text=weapon_name, padding=5)
+        weapon_frame.pack(fill=tk.X, pady=5, padx=5)
+        
+        # Status labels
+        status_frame = ttk.Frame(weapon_frame)
+        status_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(status_frame, text="Slot 1:").pack(side=tk.LEFT, padx=5)
+        slot1_status = ttk.Label(status_frame, text="Not captured", foreground="gray")
+        slot1_status.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(status_frame, text="Slot 2:").pack(side=tk.LEFT, padx=5)
+        slot2_status = ttk.Label(status_frame, text="Not captured", foreground="gray")
+        slot2_status.pack(side=tk.LEFT, padx=5)
+        
+        # Update status based on existing templates
+        template_base = weapon_config.get("template", f"{weapon_id}.png")
+        template_slot1_name = weapon_config.get("template_slot1", template_base)
+        template_slot2_name = weapon_config.get("template_slot2", template_base)
+        
+        if find_template_file(template_slot1_name):
+            slot1_status.config(text="Captured", foreground="green")
+        if find_template_file(template_slot2_name):
+            slot2_status.config(text="Captured", foreground="green")
+        
+        # Buttons frame
+        buttons_frame = ttk.Frame(weapon_frame)
+        buttons_frame.pack(pady=5)
+        
+        capture_btn = ttk.Button(
+            buttons_frame,
+            text="Capture Weapon Templates",
+            command=lambda wid=weapon_id: self.start_weapon_template_capture(wid)
+        )
+        capture_btn.pack(side=tk.LEFT, padx=5)
+        
+        cancel_btn = ttk.Button(
+            buttons_frame,
+            text="Cancel",
+            command=self.cancel_template_capture,
+            state=tk.DISABLED
+        )
+        cancel_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Store references (initialize dictionary first)
+        self.weapon_template_buttons[weapon_id] = {
+            "button": capture_btn,
+            "cancel_button": cancel_btn,
+            "slot1_status": slot1_status,
+            "slot2_status": slot2_status,
+        }
+    
+    def start_weapon_template_capture(self, weapon_id: str):
+        """Start capturing weapon templates (2 steps)."""
+        # Check if regions are configured
+        weapon_region = self.config_manager.get("regions.weapon")
+        weapon_alt_region = self.config_manager.get("regions.weapon_alt")
+        
+        if not weapon_region or not weapon_alt_region:
+            messagebox.showwarning(
+                "Regions Not Configured",
+                "Please configure weapon regions in the Regions tab first."
+            )
+            return
+        
+        # Cancel any existing capture
+        if self.waiting_for_capture:
+            self.cancel_template_capture()
+        
+        # Start step 1 (slot 1)
+        self.template_capture_mode = "weapon_slot1"
+        self.template_capture_weapon_id = weapon_id
+        self.template_capture_step = 1
+        self.waiting_for_capture = True
+        
+        weapon_name = self.config_manager.get(f"weapons.{weapon_id}.name", weapon_id.capitalize())
+        self.template_status_label.config(
+            text=f"Step 1/2: Place {weapon_name} in Slot 1, then press ALT+P",
+            foreground="blue",
+            font=("TkDefaultFont", 9)
+        )
+        self.log(f"Template capture started for {weapon_name} - Step 1/2: Slot 1")
+        
+        # Update button state
+        if weapon_id in self.weapon_template_buttons:
+            self.weapon_template_buttons[weapon_id]["button"].config(state=tk.DISABLED)
+            self.weapon_template_buttons[weapon_id]["cancel_button"].config(state=tk.NORMAL)
+        
+        # Start capture listener
+        self.start_template_capture_listener()
+    
+    def start_menu_template_capture(self):
+        """Start capturing menu template (1 step)."""
+        # Check if menu region is configured
+        menu_region = self.config_manager.get("regions.menu")
+        
+        if not menu_region:
+            messagebox.showwarning(
+                "Region Not Configured",
+                "Please configure menu region in the Regions tab first."
+            )
+            return
+        
+        # Cancel any existing capture
+        if self.waiting_for_capture:
+            self.cancel_template_capture()
+        
+        # Start menu capture
+        self.template_capture_mode = "menu"
+        self.template_capture_step = 1
+        self.waiting_for_capture = True
+        
+        self.template_status_label.config(
+            text="Open the quick menu (Q), then press ALT+P",
+            foreground="blue"
+        )
+        self.log("Menu template capture started - Open quick menu and press ALT+P")
+        
+        # Update button state
+        self.capture_menu_btn.config(state=tk.DISABLED)
+        self.cancel_menu_btn.config(state=tk.NORMAL)
+        
+        # Start capture listener
+        self.start_template_capture_listener()
+    
+    def start_template_capture_listener(self):
+        """Start listener for template capture keybind."""
+        if self.capture_listener:
+            self.capture_listener.stop()
+        
+        def on_press(key):
+            if not self.waiting_for_capture or self.template_capture_mode is None:
+                return
+            
+            try:
+                # Track modifier keys
+                if key == Key.alt_l or key == Key.alt_r:
+                    self.alt_pressed = True
+                    return
+                elif key == Key.ctrl_l or key == Key.ctrl_r:
+                    self.ctrl_pressed = True
+                    return
+                elif key == Key.shift_l or key == Key.shift_r:
+                    self.shift_pressed = True
+                    return
+                
+                # Check if P is pressed with ALT
+                if isinstance(key, KeyCode) and key.char and key.char.upper() == "P":
+                    if self.alt_pressed:
+                        self.root.after(0, self.execute_template_capture)
+                        return
+                
+                # Reset modifiers if non-modifier key pressed
+                if not isinstance(key, Key) or (key not in [Key.alt_l, Key.alt_r, Key.ctrl_l, Key.ctrl_r, Key.shift_l, Key.shift_r]):
+                    self.alt_pressed = False
+                    self.ctrl_pressed = False
+                    self.shift_pressed = False
+            except Exception:
+                pass
+        
+        def on_release(key):
+            if key == Key.alt_l or key == Key.alt_r:
+                self.alt_pressed = False
+            elif key == Key.ctrl_l or key == Key.ctrl_r:
+                self.ctrl_pressed = False
+            elif key == Key.shift_l or key == Key.shift_r:
+                self.shift_pressed = False
+        
+        self.capture_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self.capture_listener.start()
+    
+    def execute_template_capture(self):
+        """Execute template capture based on current mode."""
+        if not self.waiting_for_capture or self.template_capture_mode is None:
+            return
+        
+        # Minimize GUI
+        self.root.iconify()
+        time.sleep(0.3)  # Small delay to ensure GUI is minimized
+        
+        if self.template_capture_mode == "menu":
+            # Capture menu template
+            menu_region = self.config_manager.get("regions.menu")
+            if menu_region:
+                menu_filename = "menu_captured.png"
+                menu_path = get_captured_path(menu_filename)
+                
+                success = self._capture_template_from_region(
+                    tuple(menu_region),
+                    menu_path,
+                    "Menu"
+                )
+                if success:
+                    self.template_status_label.config(
+                        text="Menu template captured successfully!",
+                        foreground="green"
+                    )
+                    self.log(f"Menu template captured successfully: {menu_filename}")
+                    self.menu_template_status.config(text="Captured", foreground="green")
+                else:
+                    self.template_status_label.config(
+                        text="Failed to capture menu template",
+                        foreground="red"
+                    )
+                    self.log("Failed to capture menu template")
+            
+            # Reset state
+            self.cancel_template_capture()
+            
+        elif self.template_capture_mode == "weapon_slot1":
+            # Capture slot 1 template (regions.weapon is slot 1)
+            weapon_region = self.config_manager.get("regions.weapon")
+            if weapon_region:
+                weapon_config = self.config_manager.get(f"weapons.{self.template_capture_weapon_id}", {})
+                template_base = weapon_config.get("template", f"{self.template_capture_weapon_id}.png")
+                template_slot1_name = weapon_config.get("template_slot1", template_base)
+                
+                success = self._capture_template_from_region(
+                    tuple(weapon_region),
+                    get_captured_path(template_slot1_name),
+                    f"{weapon_config.get('name', self.template_capture_weapon_id)} Slot 1"
+                )
+                
+                if success:
+                    # Update status
+                    if self.template_capture_weapon_id in self.weapon_template_buttons:
+                        self.weapon_template_buttons[self.template_capture_weapon_id]["slot1_status"].config(
+                            text="Captured", foreground="green"
+                        )
+                    
+                    # Move to step 2
+                    self.template_capture_mode = "weapon_slot2"
+                    self.template_capture_step = 2
+                    
+                    weapon_name = weapon_config.get("name", self.template_capture_weapon_id.capitalize())
+                    
+                    # Show notification that slot 1 is complete and slot 2 is next
+                    messagebox.showinfo(
+                        "Slot 1 Captured",
+                        f"Slot 1 template captured successfully!\n\n"
+                        f"Now place {weapon_name} in Slot 2 and press ALT+P to capture Slot 2."
+                    )
+                    
+                    # Update status label with more prominent styling
+                    self.template_status_label.config(
+                        text=f"✓ Slot 1 captured! Step 2/2: Place {weapon_name} in Slot 2, then press ALT+P",
+                        foreground="green",
+                        font=("TkDefaultFont", 10, "bold")
+                    )
+                    self.log(f"Slot 1 captured - Step 2/2: Place {weapon_name} in Slot 2")
+                else:
+                    self.template_status_label.config(
+                        text="Failed to capture slot 1 template",
+                        foreground="red"
+                    )
+                    self.cancel_template_capture()
+            
+        elif self.template_capture_mode == "weapon_slot2":
+            # Capture slot 2 template (regions.weapon_alt is slot 2)
+            weapon_alt_region = self.config_manager.get("regions.weapon_alt")
+            if weapon_alt_region:
+                weapon_config = self.config_manager.get(f"weapons.{self.template_capture_weapon_id}", {})
+                template_base = weapon_config.get("template", f"{self.template_capture_weapon_id}.png")
+                template_slot2_name = weapon_config.get("template_slot2", template_base)
+                
+                success = self._capture_template_from_region(
+                    tuple(weapon_alt_region),
+                    get_captured_path(template_slot2_name),
+                    f"{weapon_config.get('name', self.template_capture_weapon_id)} Slot 2"
+                )
+                
+                if success:
+                    # Update status
+                    if self.template_capture_weapon_id in self.weapon_template_buttons:
+                        self.weapon_template_buttons[self.template_capture_weapon_id]["slot2_status"].config(
+                            text="Captured", foreground="green"
+                        )
+                    
+                    weapon_name = weapon_config.get("name", self.template_capture_weapon_id.capitalize())
+                    self.template_status_label.config(
+                        text=f"✓ {weapon_name} templates captured successfully! (Slot 1 & Slot 2)",
+                        foreground="green",
+                        font=("TkDefaultFont", 9)
+                    )
+                    self.log(f"{weapon_name} templates captured successfully (Slot 1 & Slot 2)")
+                else:
+                    self.template_status_label.config(
+                        text="Failed to capture slot 2 template",
+                        foreground="red"
+                    )
+            
+            # Reset state
+            self.cancel_template_capture()
+        
+        # Restore GUI
+        self.root.after(500, lambda: self.root.deiconify())
+        self.root.after(500, lambda: self.root.lift())
+    
+    def _capture_template_from_region(self, region: Tuple[int, int, int, int], save_path: Path, template_name: str) -> bool:
+        """Capture template from a specific region and save it."""
+        try:
+            # Use HashDetector to capture region
+            from .detection import HashDetector
+            detector = HashDetector()
+            region_img = detector.capture_region(region)
+            
+            if region_img is None:
+                self.log(f"Failed to capture region for {template_name}")
+                return False
+            
+            # Save template
+            cv2.imwrite(str(save_path), region_img)
+            
+            # Calculate hash for verification
+            template_hash = detector.calculate_hash(region_img)
+            
+            self.log(f"Template saved: {save_path.name} ({region_img.shape[1]}x{region_img.shape[0]} px, hash: {template_hash})")
+            
+            # Show preview
+            preview = cv2.resize(region_img, None, fx=2, fy=2)
+            cv2.imshow(f"Captured {template_name} Template", preview)
+            cv2.waitKey(2000)
+            cv2.destroyAllWindows()
+            
+            return True
+            
+        except Exception as e:
+            self.log(f"Error capturing template {template_name}: {e}")
+            return False
+    
+    def cancel_template_capture(self):
+        """Cancel template capture mode."""
+        self.waiting_for_capture = False
+        self.template_capture_mode = None
+        self.template_capture_weapon_id = None
+        self.template_capture_step = 0
+        self.alt_pressed = False
+        self.ctrl_pressed = False
+        self.shift_pressed = False
+        
+        if self.capture_listener:
+            self.capture_listener.stop()
+            self.capture_listener = None
+        
+        # Re-enable all buttons
+        if hasattr(self, 'weapon_template_buttons'):
+            for weapon_id, widgets in self.weapon_template_buttons.items():
+                widgets["button"].config(state=tk.NORMAL)
+                if "cancel_button" in widgets:
+                    widgets["cancel_button"].config(state=tk.DISABLED)
+        if hasattr(self, 'capture_menu_btn'):
+            self.capture_menu_btn.config(state=tk.NORMAL)
+        if hasattr(self, 'cancel_menu_btn'):
+            self.cancel_menu_btn.config(state=tk.DISABLED)
+        
+        self.template_status_label.config(text="", foreground="blue", font=("TkDefaultFont", 9))
     
     def create_keybinds_panel(self, parent):
         """Create keybinds configuration panel."""
@@ -1632,7 +2118,7 @@ class MacroGUI:
         import webbrowser
         
         signature_frame = tk.Frame(self.root)
-        signature_frame.pack(fill=tk.X, pady=(0, 5))
+        signature_frame.pack(fill=tk.X, padx=5, pady=(0, 2), side=tk.BOTTOM)
         
         # Create a clickable link label
         link_label = tk.Label(
@@ -1642,7 +2128,7 @@ class MacroGUI:
             fg="#0066cc",
             cursor="hand2"
         )
-        link_label.pack()
+        link_label.pack(anchor=tk.CENTER)
         
         # Bind click event to open GitHub
         link_label.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/xViada"))
@@ -1697,18 +2183,13 @@ class MacroGUI:
         # Load configuration
         config = self.config_manager.config
         
-        # Check if any weapon templates exist
-        script_dir = Path(__file__).parent
-        project_root = script_dir.parent
-        image_dir = project_root / "images"
-        
         # Get weapons config and check for at least one enabled weapon with template
         weapons_config = config.get("weapons", {})
         has_weapon = False
         for weapon_id, weapon_data in weapons_config.items():
             if weapon_data.get("enabled", True):
                 template = weapon_data.get("template", f"{weapon_id}.png")
-                if (image_dir / template).exists():
+                if find_template_file(template):
                     has_weapon = True
                     break
         
@@ -1717,12 +2198,19 @@ class MacroGUI:
             return
         
         # Initialize macro activator with weapons config
-        weapon_region = tuple(config["regions"]["weapon"])
-        weapon_region_alt = tuple(config["regions"].get("weapon_alt", config["regions"]["weapon"]))
+        # Note: weapon_alt is slot 2, weapon is slot 1
+        weapon_region_config = tuple(config["regions"]["weapon"])
+        weapon_region_alt_config = tuple(config["regions"].get("weapon_alt", config["regions"]["weapon"]))
         menu_region = tuple(config["regions"]["menu"])
         
+        # Swap: weapon_alt (slot 2) goes to weapon_region, weapon (slot 1) goes to weapon_region_alt
+        weapon_region = weapon_region_alt_config  # slot 2
+        weapon_region_alt = weapon_region_config  # slot 1
+        
+        # Use base images directory for MacroActivator (it will use organized structure internally)
+        from .image_paths import get_image_base_dir
         self.macro_activator = MacroActivator(
-            image_dir=str(image_dir),
+            image_dir=str(get_image_base_dir()),
             hash_threshold=config["detection"]["hash_threshold"],
             weapon_region=weapon_region,
             weapon_region_alt=weapon_region_alt,
@@ -1795,15 +2283,15 @@ class MacroGUI:
                     time.sleep(loop_delay)
                     continue
                 
-                # Detect weapon in slot 2 using multi-weapon detection
-                weapon_detected_slot2, weapon_id_slot2, distance_slot2 = self.macro_activator.detect_weapon(weapon_img)
+                # Detect weapon in slot 2 using multi-weapon detection (with slot 2 templates)
+                weapon_detected_slot2, weapon_id_slot2, distance_slot2 = self.macro_activator.detect_weapon(weapon_img, slot=2)
                 
-                # Detect weapon in slot 1 (alternative position)
+                # Detect weapon in slot 1 using multi-weapon detection (with slot 1 templates)
                 weapon_detected_slot1 = False
                 weapon_id_slot1 = None
                 distance_slot1 = 999
                 if weapon_alt_img is not None:
-                    weapon_detected_slot1, weapon_id_slot1, distance_slot1 = self.macro_activator.detect_weapon(weapon_alt_img)
+                    weapon_detected_slot1, weapon_id_slot1, distance_slot1 = self.macro_activator.detect_weapon(weapon_alt_img, slot=1)
                 
                 # Use the BEST match (lowest distance) between both regions
                 threshold = self.macro_activator.detector.hash_threshold
@@ -1840,9 +2328,30 @@ class MacroGUI:
                 if weapon_detected and detected_weapon_id:
                     self.macro_activator.apply_weapon_delays(detected_weapon_id)
                 
-                # Log detection changes
+                # Log detection changes with more detail
                 if not weapon_detected and self.weapon_detected:
-                    self.log(f"Weapon lost - Slot 2: dist={distance_slot2}, Slot 1: dist={distance_slot1} (threshold={threshold})")
+                    # Show which weapons were checked and their distances
+                    weapon_info_slot2 = "None"
+                    weapon_info_slot1 = "None"
+                    if weapon_id_slot2:
+                        weapon_name_slot2 = self.macro_activator.weapon_hashes.get(weapon_id_slot2, {}).get("name", weapon_id_slot2)
+                        weapon_info_slot2 = f"{weapon_name_slot2}(dist={distance_slot2})"
+                    else:
+                        weapon_info_slot2 = f"dist={distance_slot2}"
+                    if weapon_id_slot1:
+                        weapon_name_slot1 = self.macro_activator.weapon_hashes.get(weapon_id_slot1, {}).get("name", weapon_id_slot1)
+                        weapon_info_slot1 = f"{weapon_name_slot1}(dist={distance_slot1})"
+                    else:
+                        weapon_info_slot1 = f"dist={distance_slot1}"
+                    
+                    # If distances are very high (999), suggest checking regions or recapturing template
+                    suggestion = ""
+                    if distance_slot2 >= 999 and distance_slot1 >= 999:
+                        suggestion = " - Verifica que las regiones estén correctamente configuradas"
+                    elif distance_slot2 > threshold * 2 or distance_slot1 > threshold * 2:
+                        suggestion = f" - Considera recapturar el template del arma desde este slot"
+                    
+                    self.log(f"Weapon lost - Slot 2: {weapon_info_slot2}, Slot 1: {weapon_info_slot1} (threshold={threshold}){suggestion}")
                     last_detected_weapon = None
                 elif weapon_detected and detected_weapon_id != last_detected_weapon:
                     weapon_name = self.macro_activator.weapon_hashes.get(detected_weapon_id, {}).get("name", detected_weapon_id)
