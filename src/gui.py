@@ -1940,23 +1940,14 @@ class MacroGUI:
         frame = ttk.LabelFrame(parent, text="Global Keybinds", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Pause/Resume
-        pause_frame = ttk.Frame(frame)
-        pause_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(pause_frame, text="Pause/Resume:").pack(side=tk.LEFT)
-        self.pause_key_var = tk.StringVar(value=self.config_manager.get("keybinds.pause_resume"))
-        pause_entry = ttk.Entry(pause_frame, textvariable=self.pause_key_var, width=15)
-        pause_entry.pack(side=tk.LEFT, padx=10)
-        pause_entry.bind("<KeyPress>", lambda e: self.on_keybind_change(e, "pause_resume"))
-        
-        # Stop
-        stop_frame = ttk.Frame(frame)
-        stop_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(stop_frame, text="Stop Completely:").pack(side=tk.LEFT)
-        self.stop_key_var = tk.StringVar(value=self.config_manager.get("keybinds.stop"))
-        stop_entry = ttk.Entry(stop_frame, textvariable=self.stop_key_var, width=15)
-        stop_entry.pack(side=tk.LEFT, padx=10)
-        stop_entry.bind("<KeyPress>", lambda e: self.on_keybind_change(e, "stop"))
+        # Start/Stop Toggle
+        toggle_frame = ttk.Frame(frame)
+        toggle_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(toggle_frame, text="Start/Stop:").pack(side=tk.LEFT)
+        self.stop_key_var = tk.StringVar(value=self.config_manager.get("keybinds.stop", "F7"))
+        toggle_entry = ttk.Entry(toggle_frame, textvariable=self.stop_key_var, width=15)
+        toggle_entry.pack(side=tk.LEFT, padx=10)
+        toggle_entry.bind("<KeyPress>", lambda e: self.on_keybind_change(e, "stop"))
         
         # Capture Screen
         capture_frame = ttk.Frame(frame)
@@ -2062,11 +2053,28 @@ class MacroGUI:
             self.led_indicators = {}
         self.led_indicators[label] = (canvas, led_id)
     
-    def update_led(self, label, state):
-        """Update LED indicator state."""
+    def update_led(self, label, state, macro_running=None):
+        """Update LED indicator state.
+        
+        Args:
+            label: Label of the LED indicator
+            state: Boolean state (True/False)
+            macro_running: Optional boolean indicating if macro is running. 
+                          If False, LED will be gray regardless of state.
+        """
         if hasattr(self, "led_indicators") and label in self.led_indicators:
             canvas, led_id = self.led_indicators[label]
-            color = "green" if state else "red"
+            # If macro_running is explicitly False, set to gray
+            if macro_running is False:
+                color = "gray"
+            else:
+                # Use macro_running from instance if not provided
+                if macro_running is None:
+                    macro_running = self.macro_running
+                if not macro_running:
+                    color = "gray"
+                else:
+                    color = "green" if state else "red"
             canvas.itemconfig(led_id, fill=color)
     
     def create_main_controls(self):
@@ -2238,6 +2246,13 @@ class MacroGUI:
         loaded_weapons = [w["name"] for w in self.macro_activator.weapon_hashes.values()]
         self.log(f"Macro started - Loaded weapons: {', '.join(loaded_weapons)}")
     
+    def toggle_macro(self):
+        """Toggle macro on/off (start if stopped, stop if running)."""
+        if self.macro_running:
+            self.stop_macro()
+        else:
+            self.start_macro()
+    
     def stop_macro(self):
         """Stop the macro."""
         self.should_stop = True
@@ -2252,6 +2267,12 @@ class MacroGUI:
         self.start_stop_btn.config(text="START", bg="#4CAF50")
         self.status_label.config(text="Stopped")
         self.log("Macro stopped")
+        
+        # Set all status indicators to gray
+        self.root.after(0, lambda: self.update_led("Weapon Detected", False, macro_running=False))
+        self.root.after(0, lambda: self.update_led("Menu Detected", False, macro_running=False))
+        self.root.after(0, lambda: self.update_led("Macro Active", False, macro_running=False))
+        self.root.after(0, lambda: self.update_led("Autoclick Running", False, macro_running=False))
     
     def pause_resume_macro(self):
         """Pause or resume the macro."""
@@ -2259,7 +2280,18 @@ class MacroGUI:
             return
         
         self.macro_paused = not self.macro_paused
-        status = "Paused" if self.macro_paused else "Running"
+        
+        # When pausing, deactivate the macro in MacroActivator
+        # When resuming, let the loop reactivate it automatically
+        if self.macro_paused:
+            if self.macro_activator and self.macro_activator.macro_active:
+                self.macro_activator._deactivate_macro()
+                self.macro_active = False
+            status = "Paused"
+        else:
+            status = "Running"
+            # When resuming, the loop will automatically reactivate if conditions are met
+        
         self.status_label.config(text=status)
         self.log(f"Macro {status.lower()}")
     
@@ -2372,8 +2404,8 @@ class MacroGUI:
                 self.weapon_detected = weapon_detected
                 self.menu_detected = menu_detected
                 
-                # Logic: activate macro ONLY if weapon detected AND menu NOT detected
-                should_activate = weapon_detected and not menu_detected
+                # Logic: activate macro ONLY if weapon detected AND menu NOT detected AND not paused
+                should_activate = weapon_detected and not menu_detected and not self.macro_paused
                 
                 if should_activate:
                     if not self.macro_activator.macro_active:
@@ -2385,7 +2417,9 @@ class MacroGUI:
                     if self.macro_activator.macro_active:
                         self.macro_activator._deactivate_macro()
                         self.macro_active = False
-                        if menu_detected:
+                        if self.macro_paused:
+                            self.log("Macro paused by user")
+                        elif menu_detected:
                             self.log("Menu detected - Macro paused")
                         else:
                             self.log("Weapon not detected - Macro deactivated")
@@ -2393,11 +2427,11 @@ class MacroGUI:
                 # Update autoclick status
                 self.autoclick_running = self.macro_activator.autoclicker.autoclick_running
                 
-                # Update LEDs
-                self.root.after(0, lambda: self.update_led("Weapon Detected", weapon_detected))
-                self.root.after(0, lambda: self.update_led("Menu Detected", menu_detected))
-                self.root.after(0, lambda: self.update_led("Macro Active", self.macro_active))
-                self.root.after(0, lambda: self.update_led("Autoclick Running", self.autoclick_running))
+                # Update LEDs (only update if macro is running)
+                self.root.after(0, lambda: self.update_led("Weapon Detected", weapon_detected, macro_running=self.macro_running))
+                self.root.after(0, lambda: self.update_led("Menu Detected", menu_detected, macro_running=self.macro_running))
+                self.root.after(0, lambda: self.update_led("Macro Active", self.macro_active, macro_running=self.macro_running))
+                self.root.after(0, lambda: self.update_led("Autoclick Running", self.autoclick_running, macro_running=self.macro_running))
                 
                 time.sleep(loop_delay)
                 
@@ -2410,16 +2444,13 @@ class MacroGUI:
         if self.keybind_listener:
             self.keybind_listener.stop()
         
-        pause_key = self.config_manager.get("keybinds.pause_resume", "F6")
-        stop_key = self.config_manager.get("keybinds.stop", "F7")
+        toggle_key = self.config_manager.get("keybinds.stop", "F7")
         
         def on_press(key):
             try:
                 key_name = self.get_key_name_from_listener(key)
-                if key_name == pause_key:
-                    self.root.after(0, self.pause_resume_macro)
-                elif key_name == stop_key:
-                    self.root.after(0, self.stop_macro)
+                if key_name == toggle_key:
+                    self.root.after(0, self.toggle_macro)
             except Exception:
                 pass
         
