@@ -2343,13 +2343,6 @@ class MacroGUI:
         # Schedule on main thread
         self.root.after(0, show_error_popup)
     
-    def toggle_macro(self):
-        """Toggle macro start/stop."""
-        if not self.macro_running:
-            self.start_macro()
-        else:
-            self.stop_macro()
-    
     def start_macro(self):
         """Start the macro."""
         if self.macro_running:
@@ -2546,9 +2539,9 @@ class MacroGUI:
                     # If distances are very high (999), suggest checking regions or recapturing template
                     suggestion = ""
                     if distance_slot2 >= 999 and distance_slot1 >= 999:
-                        suggestion = " - Verifica que las regiones estén correctamente configuradas"
+                        suggestion = " - Check that regions are correctly configured"
                     elif distance_slot2 > threshold * 2 or distance_slot1 > threshold * 2:
-                        suggestion = f" - Considera recapturar el template del arma desde este slot"
+                        suggestion = " - Consider recapturing the weapon template from this slot"
                     
                     self.log(f"Weapon lost - Slot 2: {weapon_info_slot2}, Slot 1: {weapon_info_slot1} (threshold={threshold}){suggestion}")
                     last_detected_weapon = None
