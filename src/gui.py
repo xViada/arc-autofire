@@ -283,6 +283,11 @@ class MacroGUI:
         # Capture screen listener (temporary)
         self.capture_listener: Optional[keyboard.Listener] = None
         self.waiting_for_capture = False
+        
+        # Keybind recording state
+        self.keybind_recording_listener: Optional[keyboard.Listener] = None
+        self.recording_keybind_type: Optional[str] = None  # "stop", "capture_screen"
+        self.recording_modifiers = {"alt": False, "ctrl": False, "shift": False}
         self.capture_mode: Optional[str] = None  # "capture" or "autodetect"
         self.autodetect_step = 1  # 1 = first capture, 2 = second capture
         self.first_capture_results: Optional[Dict[str, Any]] = None
@@ -1940,23 +1945,48 @@ class MacroGUI:
         frame = ttk.LabelFrame(parent, text="Global Keybinds", padding=10)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # Instructions
+        instructions = ttk.Label(
+            frame, 
+            text="Click a button and press the desired key combination (ESC to cancel)",
+            font=("Arial", 9),
+            foreground="gray"
+        )
+        instructions.pack(pady=(0, 10))
+        
         # Start/Stop Toggle
         toggle_frame = ttk.Frame(frame)
-        toggle_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(toggle_frame, text="Start/Stop:").pack(side=tk.LEFT)
-        self.stop_key_var = tk.StringVar(value=self.config_manager.get("keybinds.stop", "F7"))
-        toggle_entry = ttk.Entry(toggle_frame, textvariable=self.stop_key_var, width=15)
-        toggle_entry.pack(side=tk.LEFT, padx=10)
-        toggle_entry.bind("<KeyPress>", lambda e: self.on_keybind_change(e, "stop"))
+        toggle_frame.pack(fill=tk.X, pady=8)
+        ttk.Label(toggle_frame, text="Start/Stop:", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        current_stop_key = self.config_manager.get("keybinds.stop", "F7")
+        self.stop_keybind_btn = tk.Button(
+            toggle_frame,
+            text=current_stop_key,
+            width=20,
+            command=lambda: self.start_recording_keybind("stop"),
+            relief=tk.RAISED,
+            bg="#f0f0f0",
+            activebackground="#e0e0e0"
+        )
+        self.stop_keybind_btn.pack(side=tk.LEFT, padx=10)
         
         # Capture Screen
         capture_frame = ttk.Frame(frame)
-        capture_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(capture_frame, text="Capture Screen:").pack(side=tk.LEFT)
-        self.capture_key_var = tk.StringVar(value=self.config_manager.get("keybinds.capture_screen", "ALT+P"))
-        capture_entry = ttk.Entry(capture_frame, textvariable=self.capture_key_var, width=15)
-        capture_entry.pack(side=tk.LEFT, padx=10)
-        capture_entry.bind("<KeyPress>", lambda e: self.on_capture_keybind_change(e))
+        capture_frame.pack(fill=tk.X, pady=8)
+        ttk.Label(capture_frame, text="Capture Screen:", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        current_capture_key = self.config_manager.get("keybinds.capture_screen", "ALT+P")
+        self.capture_keybind_btn = tk.Button(
+            capture_frame,
+            text=current_capture_key,
+            width=20,
+            command=lambda: self.start_recording_keybind("capture_screen"),
+            relief=tk.RAISED,
+            bg="#f0f0f0",
+            activebackground="#e0e0e0"
+        )
+        self.capture_keybind_btn.pack(side=tk.LEFT, padx=10)
         
         # Status indicator
         status_frame = ttk.LabelFrame(frame, text="Status", padding=10)
@@ -1964,57 +1994,194 @@ class MacroGUI:
         self.status_label = ttk.Label(status_frame, text="Stopped", font=("Arial", 12, "bold"))
         self.status_label.pack()
     
-    def on_keybind_change(self, event, keybind_type):
-        """Handle keybind change."""
-        key_name = self.get_key_name(event)
-        if key_name:
-            self.config_manager.set(f"keybinds.{keybind_type}", key_name)
-            self.config_manager.save()
+    def start_recording_keybind(self, keybind_type: str):
+        """Start recording a keybind."""
+        # Stop any existing recording
+        self.stop_recording_keybind()
+        
+        # Set recording state
+        self.recording_keybind_type = keybind_type
+        self.recording_modifiers = {"alt": False, "ctrl": False, "shift": False}
+        
+        # Update button appearance
+        if keybind_type == "stop":
+            self.stop_keybind_btn.config(
+                text="Press any key...",
+                bg="#ffeb3b",
+                activebackground="#ffc107",
+                state=tk.DISABLED
+            )
+        elif keybind_type == "capture_screen":
+            self.capture_keybind_btn.config(
+                text="Press any key...",
+                bg="#ffeb3b",
+                activebackground="#ffc107",
+                state=tk.DISABLED
+            )
+        
+        # Start global keyboard listener after a small delay to ensure UI updates
+        def start_listener():
+            def on_press(key):
+                try:
+                    if not self.recording_keybind_type:
+                        return
+                    
+                    # Handle ESC to cancel recording
+                    if key == Key.esc:
+                        self.root.after(0, self.cancel_recording_keybind)
+                        return
+                    
+                    # Check if this is a modifier key
+                    is_modifier = False
+                    if key == Key.alt_l or key == Key.alt_r:
+                        self.recording_modifiers["alt"] = True
+                        is_modifier = True
+                    elif key == Key.ctrl_l or key == Key.ctrl_r:
+                        self.recording_modifiers["ctrl"] = True
+                        is_modifier = True
+                    elif key == Key.shift_l or key == Key.shift_r:
+                        self.recording_modifiers["shift"] = True
+                        is_modifier = True
+                    
+                    # If it's a modifier, don't capture yet - wait for a non-modifier key
+                    if is_modifier:
+                        return
+                    
+                    # Get the key name (this should be a non-modifier key)
+                    key_name = self.get_key_name_from_listener(key)
+                    # Only capture if we have a valid non-modifier key name
+                    # and it's not a modifier key itself
+                    if key_name and self.recording_keybind_type:
+                        # Double-check: make sure key_name is not a modifier
+                        if key_name in ["ALT", "CTRL", "SHIFT"]:
+                            return
+                        
+                        # Build keybind string using current modifier state
+                        modifiers = []
+                        if self.recording_modifiers["alt"]:
+                            modifiers.append("ALT")
+                        if self.recording_modifiers["ctrl"]:
+                            modifiers.append("CTRL")
+                        if self.recording_modifiers["shift"]:
+                            modifiers.append("SHIFT")
+                        
+                        # Only save if we have at least a non-modifier key
+                        # (modifiers alone are not valid keybinds)
+                        if modifiers:
+                            keybind_str = "+".join(modifiers) + "+" + key_name
+                        else:
+                            keybind_str = key_name
+                        
+                        # Save the keybind (schedule UI update on main thread)
+                        # Use a closure to capture the keybind_str value
+                        keybind_to_save = keybind_str
+                        self.root.after(0, lambda k=keybind_to_save: self.save_recorded_keybind(k))
+                except Exception as e:
+                    self.log(f"Error recording keybind: {e}")
+                    import traceback
+                    self.log(traceback.format_exc())
+            
+            def on_release(key):
+                try:
+                    # Only clear modifiers if recording is still active
+                    # (if we already saved, recording_keybind_type will be None)
+                    if not self.recording_keybind_type:
+                        return
+                    
+                    # Handle modifier keys release
+                    if key == Key.alt_l or key == Key.alt_r:
+                        self.recording_modifiers["alt"] = False
+                    elif key == Key.ctrl_l or key == Key.ctrl_r:
+                        self.recording_modifiers["ctrl"] = False
+                    elif key == Key.shift_l or key == Key.shift_r:
+                        self.recording_modifiers["shift"] = False
+                except Exception:
+                    pass
+            
+            self.keybind_recording_listener = keyboard.Listener(
+                on_press=on_press,
+                on_release=on_release
+            )
+            self.keybind_recording_listener.start()
+            self.log(f"Recording keybind for {keybind_type}... Press any key combination")
+        
+        # Start listener after UI updates
+        self.root.after(50, start_listener)
+    
+    def stop_recording_keybind(self):
+        """Stop recording keybind."""
+        if self.keybind_recording_listener:
+            try:
+                self.keybind_recording_listener.stop()
+            except Exception:
+                pass
+            self.keybind_recording_listener = None
+        
+        self.recording_keybind_type = None
+        self.recording_modifiers = {"alt": False, "ctrl": False, "shift": False}
+    
+    def cancel_recording_keybind(self):
+        """Cancel recording keybind without saving."""
+        keybind_type = self.recording_keybind_type
+        self.stop_recording_keybind()
+        
+        # Restore button to show current keybind
+        if keybind_type == "stop":
+            current_key = self.config_manager.get("keybinds.stop", "F7")
+            self.stop_keybind_btn.config(
+                text=current_key,
+                bg="#f0f0f0",
+                activebackground="#e0e0e0",
+                state=tk.NORMAL
+            )
+        elif keybind_type == "capture_screen":
+            current_key = self.config_manager.get("keybinds.capture_screen", "ALT+P")
+            self.capture_keybind_btn.config(
+                text=current_key,
+                bg="#f0f0f0",
+                activebackground="#e0e0e0",
+                state=tk.NORMAL
+            )
+        
+        self.log("Keybind recording cancelled")
+    
+    def save_recorded_keybind(self, keybind_str: str):
+        """Save the recorded keybind."""
+        if not self.recording_keybind_type:
+            return
+        
+        # Save the keybind type before stopping recording
+        keybind_type = self.recording_keybind_type
+        
+        # Stop recording
+        self.stop_recording_keybind()
+        
+        # Save to config
+        self.config_manager.set(f"keybinds.{keybind_type}", keybind_str)
+        self.config_manager.save()
+        
+        # Update button text
+        if keybind_type == "stop":
+            self.stop_keybind_btn.config(
+                text=keybind_str,
+                bg="#f0f0f0",
+                activebackground="#e0e0e0",
+                state=tk.NORMAL
+            )
             # Restart keybind listener
             self.start_keybind_listener()
-            self.log(f"{keybind_type} keybind set to {key_name}")
-    
-    def on_capture_keybind_change(self, event):
-        """Handle capture keybind change."""
-        # Check for Alt modifier
-        modifiers = []
-        if event.state & 0x20000:  # Alt key
-            modifiers.append("ALT")
-        if event.state & 0x4:  # Control key
-            modifiers.append("CTRL")
-        if event.state & 0x1:  # Shift key
-            modifiers.append("SHIFT")
-        
-        key_name = self.get_key_name(event)
-        if key_name:
-            if modifiers:
-                keybind_str = "+".join(modifiers) + "+" + key_name
-            else:
-                keybind_str = key_name
-            
-            self.config_manager.set("keybinds.capture_screen", keybind_str)
-            self.config_manager.save()
-            self.capture_key_var.set(keybind_str)
-            
+        elif keybind_type == "capture_screen":
+            self.capture_keybind_btn.config(
+                text=keybind_str,
+                bg="#f0f0f0",
+                activebackground="#e0e0e0",
+                state=tk.NORMAL
+            )
             # Restart capture listener if waiting
             if self.waiting_for_capture:
                 self.start_capture_listener()
-            
-            self.log(f"Capture screen keybind set to {keybind_str}")
-    
-    def get_key_name(self, event):
-        """Get key name from event."""
-        if event.keysym.startswith("F") and event.keysym[1:].isdigit():
-            return event.keysym.upper()
-        elif event.keysym == "Escape":
-            return "ESC"
-        elif event.keysym == "Return":
-            return "ENTER"
-        elif event.keysym == "space":
-            return "SPACE"
-        elif len(event.keysym) == 1:
-            return event.keysym.upper()
-        return None
+        
+        self.log(f"Keybind {keybind_type} set to: {keybind_str}")
     
     def create_status_panel(self, parent):
         """Create status/logs panel."""
@@ -2590,6 +2757,10 @@ class MacroGUI:
         # Stop keybind listener
         if self.keybind_listener:
             self.keybind_listener.stop()
+        
+        # Stop keybind recording listener
+        if self.keybind_recording_listener:
+            self.keybind_recording_listener.stop()
         
         # Stop capture listener
         if self.capture_listener:
