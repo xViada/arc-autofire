@@ -3,6 +3,13 @@ GUI for ARC-AutoFire - Intelligent Macro System for Arc Raiders.
 """
 
 import ctypes
+
+# Set Windows AppUserModelID BEFORE tkinter import to show custom taskbar icon
+try:
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("xViada.ARC-AutoFire.1.0")
+except Exception:
+    pass
+
 import queue
 import re
 import threading
@@ -12,12 +19,6 @@ from typing import Optional, Tuple, Dict, Any
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import win32gui
-
-# Set Windows AppUserModelID to show custom taskbar icon instead of Python default
-try:
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("xViada.ARC-AutoFire.1.0")
-except Exception:
-    pass
 import cv2
 import mss
 import numpy as np
