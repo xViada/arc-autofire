@@ -1601,8 +1601,10 @@ class MacroGUI:
         
         # Update status based on existing templates
         template_base = weapon_config.get("template", f"{weapon_id}.png")
-        template_slot1_name = weapon_config.get("template_slot1", template_base)
-        template_slot2_name = weapon_config.get("template_slot2", template_base)
+        # Generate slot-specific names if not explicitly configured
+        base_name = template_base.rsplit('.', 1)[0]  # Remove extension
+        template_slot1_name = weapon_config.get("template_slot1", f"{base_name}_slot1.png")
+        template_slot2_name = weapon_config.get("template_slot2", f"{base_name}_slot2.png")
         
         if find_template_file(template_slot1_name):
             slot1_status.config(text="Captured", foreground="green")
@@ -1799,7 +1801,9 @@ class MacroGUI:
             if weapon_region:
                 weapon_config = self.config_manager.get(f"weapons.{self.template_capture_weapon_id}", {})
                 template_base = weapon_config.get("template", f"{self.template_capture_weapon_id}.png")
-                template_slot1_name = weapon_config.get("template_slot1", template_base)
+                # Generate slot-specific name if not explicitly configured
+                base_name = template_base.rsplit('.', 1)[0]  # Remove extension
+                template_slot1_name = weapon_config.get("template_slot1", f"{base_name}_slot1.png")
                 
                 success = self._capture_template_from_region(
                     tuple(weapon_region),
@@ -1847,7 +1851,9 @@ class MacroGUI:
             if weapon_alt_region:
                 weapon_config = self.config_manager.get(f"weapons.{self.template_capture_weapon_id}", {})
                 template_base = weapon_config.get("template", f"{self.template_capture_weapon_id}.png")
-                template_slot2_name = weapon_config.get("template_slot2", template_base)
+                # Generate slot-specific name if not explicitly configured
+                base_name = template_base.rsplit('.', 1)[0]  # Remove extension
+                template_slot2_name = weapon_config.get("template_slot2", f"{base_name}_slot2.png")
                 
                 success = self._capture_template_from_region(
                     tuple(weapon_alt_region),

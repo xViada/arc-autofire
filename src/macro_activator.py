@@ -142,8 +142,10 @@ class MacroActivator:
             
             # Get template filenames (support per-slot templates with fallback)
             template_base = weapon_config.get("template", f"{weapon_id}.png")
-            template_slot1_name = weapon_config.get("template_slot1", template_base)
-            template_slot2_name = weapon_config.get("template_slot2", template_base)
+            # Generate slot-specific names if not explicitly configured
+            base_name = template_base.rsplit('.', 1)[0]  # Remove extension
+            template_slot1_name = weapon_config.get("template_slot1", f"{base_name}_slot1.png")
+            template_slot2_name = weapon_config.get("template_slot2", f"{base_name}_slot2.png")
             
             # Load slot 1 template (check templates/ and captured/ directories)
             template_slot1_path = find_template_file(template_slot1_name)
