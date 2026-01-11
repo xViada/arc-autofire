@@ -56,6 +56,15 @@ DEFAULT_WEAPONS = {
         "enabled": True,
         "profile": "optimal",
         "default_profiles": {
+             "fast": {
+                "name": "Fast",
+                "delays": {
+                    "click_down_min": 19,
+                    "click_down_max": 19,
+                    "click_up_min": 19,
+                    "click_up_max": 19,
+                }
+            },
             "optimal": {
                 "name": "Optimal",
                 "delays": {
@@ -81,6 +90,15 @@ DEFAULT_WEAPONS = {
         "enabled": True,
         "profile": "optimal",
         "default_profiles": {
+             "fast": {
+                "name": "Fast",
+                "delays": {
+                    "click_down_min": 35,
+                    "click_down_max": 35,
+                    "click_up_min": 35,
+                    "click_up_max": 35,
+                }
+            },
             "optimal": {
                 "name": "Optimal",
                 "delays": {
@@ -96,6 +114,92 @@ DEFAULT_WEAPONS = {
             "click_down_max": 38,
             "click_up_min": 35,
             "click_up_max": 38,
+        }
+    },
+    "venator": {
+        "name": "Venator",
+        "template": "venator.png",
+        "enabled": True,
+        "profile": "venator_i_optimal",
+        "default_profiles": {
+            "venator_i_fast": {
+                "name": "Venator I Fast",
+                "delays": {
+                    "click_down_min": 100,
+                    "click_down_max": 100,
+                    "click_up_min": 100,
+                    "click_up_max": 100,
+                }
+            },
+            "venator_i_optimal": {
+                "name": "Venator I Optimal",
+                "delays": {
+                    "click_down_min": 100,
+                    "click_down_max": 103,
+                    "click_up_min": 100,
+                    "click_up_max": 103,
+                }
+            },
+            "venator_ii_fast": {
+                "name": "Venator II Fast",
+                "delays": {
+                    "click_down_min": 100,
+                    "click_down_max": 100,
+                    "click_up_min": 100,
+                    "click_up_max": 100,
+                }
+            },
+            "venator_ii_optimal": {
+                "name": "Venator II Optimal",
+                "delays": {
+                    "click_down_min": 100,
+                    "click_down_max": 103,
+                    "click_up_min": 100,
+                    "click_up_max": 103,
+                }
+            },
+            "venator_iii_fast": {
+                "name": "Venator III Fast",
+                "delays": {
+                    "click_down_min": 84,
+                    "click_down_max": 84,
+                    "click_up_min": 84,
+                    "click_up_max": 84,
+                }
+            },
+            "venator_iii_optimal": {
+                "name": "Venator III Optimal",
+                "delays": {
+                    "click_down_min": 84,
+                    "click_down_max": 87,
+                    "click_up_min": 84,
+                    "click_up_max": 87,
+                }
+            },
+            "venator_iv_fast": {
+                "name": "Venator IV Fast",
+                "delays": {
+                    "click_down_min": 68,
+                    "click_down_max": 68,
+                    "click_up_min": 68,
+                    "click_up_max": 68,
+                }
+            },
+            "venator_iv_optimal": {
+                "name": "Venator IV Optimal",
+                "delays": {
+                    "click_down_min": 68,
+                    "click_down_max": 71,
+                    "click_up_min": 68,
+                    "click_up_max": 71,
+                }
+            },
+        },
+        "delays": {
+            "click_down_min": 50,
+            "click_down_max": 55,
+            "click_up_min": 50,
+            "click_up_max": 55,
         }
     },
 }

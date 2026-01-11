@@ -465,11 +465,11 @@ class MacroGUI:
         ttk.Label(top_frame, text="Profile:").pack(side=tk.LEFT)
         profile_var = tk.StringVar(value=current_display)
         profile_combo = ttk.Combobox(
-            top_frame, 
-            textvariable=profile_var, 
+            top_frame,
+            textvariable=profile_var,
             values=list(profile_options.keys()),
             state="readonly",
-            width=10
+            width=17
         )
         profile_combo.pack(side=tk.LEFT, padx=5)
         
