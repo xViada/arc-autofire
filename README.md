@@ -135,29 +135,30 @@ The **recommended method** for setting up detection regions is using the **Auto-
    - Click the **"Auto-detect Regions"** button
    - The application will wait for you to capture a screenshot
 
-4. **Step 1/2 - Capture with single Weapon Slot and "Q"**:
-   - In-game, equip a **kettle** in **Slot 1** and select it
-   - In-game, equip a weapon in **Slot 2**
-   - Make sure the game "Q" menu is **VISIBLE**
+4. **Step 1/3 - Capture Quick Menu**:
+   - In-game, press **Q** to open the Quick Menu
+   - Make sure the Quick Menu is **VISIBLE** on screen
    - Press the capture keybind (default: `ALT+P`) to take a screenshot
-   - The application will automatically detect:
-     - Weapon region for Slot 2
-     - "Q" menu region
-   - A preview window will show the detected regions with confidence percentages
+   - The application will automatically detect the Quick Menu region
+   - A preview window will show the detected region with confidence percentage
 
-5. **Step 2/2 - Capture with two Weapon Slots**:
-   - In-game, equip a **kettle** in **Slot 1**
-   - In-game, equip a different weapon in **Slot 2** and select it
-   - Make sure the game "Q" menu is **NOT visible**
+5. **Step 2/3 - Capture Weapon in Slot 1**:
+   - In-game, equip a **kettle** (or any configured weapon) in **Slot 1** and select it
+   - Close the Quick Menu (press Q again or click elsewhere)
    - Press the capture keybind again (default: `ALT+P`)
-   - The application will automatically detect:
-     - Weapon region for Slot 1
+   - The application will automatically detect the Weapon region for Slot 1
+   - A preview window will show the detected region
+
+6. **Step 3/3 - Capture Weapon in Slot 2**:
+   - In-game, switch to **Slot 2** (the same weapon should now appear in the Slot 2 position)
+   - Press the capture keybind again (default: `ALT+P`)
+   - The application will automatically detect the Weapon region for Slot 2
    - A final preview will show all three detected regions
 
-6. **Review and Confirm**: 
+7. **Review and Confirm**: 
    - Check the confidence percentages (should be above your threshold, typically 0.8)
    - Verify the regions are correctly positioned in the preview
-   - Click "Save Regions" to apply the configuration
+   - The configuration is automatically saved
 
 #### Manual Region Selection (Alternative)
 

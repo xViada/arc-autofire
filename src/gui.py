@@ -290,8 +290,9 @@ class MacroGUI:
         self.recording_keybind_type: Optional[str] = None  # "stop", "capture_screen"
         self.recording_modifiers = {"alt": False, "ctrl": False, "shift": False}
         self.capture_mode: Optional[str] = None  # "capture" or "autodetect"
-        self.autodetect_step = 1  # 1 = first capture, 2 = second capture
+        self.autodetect_step = 1  # 1 = quick menu, 2 = slot 1, 3 = slot 2
         self.first_capture_results: Optional[Dict[str, Any]] = None
+        self.second_capture_results: Optional[Dict[str, Any]] = None
         self.alt_pressed = False
         self.ctrl_pressed = False
         self.shift_pressed = False
@@ -629,7 +630,7 @@ class MacroGUI:
         
         instructions_text = (
             "1. Use 'Capture Screen' to take a screenshot and manually select regions\n"
-            "2. Use 'Auto-detect Regions' to automatically find regions (2 steps: Slot 1, then Slot 2)\n"
+            "2. Use 'Auto-detect Regions' to automatically find regions (3 steps: Quick Menu, Slot 1, then Slot 2)\n"
             "3. Adjust confidence threshold if auto-detection fails\n"
             "4. Regions are saved automatically when set"
         )
@@ -711,13 +712,14 @@ class MacroGUI:
         self.capture_mode = "autodetect"
         self.autodetect_step = 1  # Start with step 1
         self.first_capture_results = None
+        self.second_capture_results = None
         self.autodetect_btn.config(text="Cancel Auto-detect", state=tk.NORMAL)
         self.capture_btn.config(state=tk.DISABLED)  # Disable capture button while autodetect is waiting
         self.capture_status_label.config(
-            text=f"Step 1/2: Capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
+            text=f"Step 1/3: Capture with Quick Menu open. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
             foreground="blue"
         )
-        self.log(f"Auto-detect Step 1/2: Waiting for capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
+        self.log(f"Auto-detect Step 1/3: Waiting for capture with Quick Menu open. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
         
         # Start listener for capture keybind
         self.start_capture_listener()
@@ -751,52 +753,27 @@ class MacroGUI:
             menu_template_path = find_template_file("menu.png")
             
             if step == 1:
-                # Step 1: Detect menu and weapon in slot 1
-                if weapon_template_path is None:
-                    self.root.after(0, lambda: self._show_detection_error("No enabled weapon template found in /images.\nAdd a weapon with a valid template first."))
-                    return
-                
+                # Step 1: Detect Quick Menu only
                 if not menu_template_path.exists():
                     self.root.after(0, lambda: self._show_detection_error("menu.png not found in /images"))
                     return
                 
-                # Load templates
-                weapon_template = cv2.imread(str(weapon_template_path), cv2.IMREAD_GRAYSCALE)
+                # Load menu template
                 menu_template = cv2.imread(str(menu_template_path), cv2.IMREAD_GRAYSCALE)
-                
-                if weapon_template is None:
-                    self.root.after(0, lambda msg=weapon_template_name: self._show_detection_error(f"Failed to load {msg}"))
-                    return
                 
                 if menu_template is None:
                     self.root.after(0, lambda: self._show_detection_error("Failed to load menu.png"))
                     return
                 
-                # Perform template matching
-                weapon_result = cv2.matchTemplate(screen_gray, weapon_template, cv2.TM_CCOEFF_NORMED)
+                # Perform template matching for menu
                 menu_result = cv2.matchTemplate(screen_gray, menu_template, cv2.TM_CCOEFF_NORMED)
-                
-                # Find best matches
-                _, weapon_max_val, _, weapon_max_loc = cv2.minMaxLoc(weapon_result)
                 _, menu_max_val, _, menu_max_loc = cv2.minMaxLoc(menu_result)
                 
-                # Check if both found with sufficient confidence
-                weapon_found = weapon_max_val >= confidence_threshold
+                # Check if found with sufficient confidence
                 menu_found = menu_max_val >= confidence_threshold
                 
-                # Calculate regions (slot 1 stored as weapon_alt_region, will be saved to regions.weapon)
-                weapon_alt_region = None
+                # Calculate menu region
                 menu_region = None
-                
-                if weapon_found:
-                    h, w = weapon_template.shape
-                    weapon_alt_region = (
-                        weapon_max_loc[0],
-                        weapon_max_loc[1],
-                        weapon_max_loc[0] + w,
-                        weapon_max_loc[1] + h
-                    )
-                
                 if menu_found:
                     h, w = menu_template.shape
                     menu_region = (
@@ -806,34 +783,80 @@ class MacroGUI:
                         menu_max_loc[1] + h
                     )
                 
-                # Store results for step 2
+                # Store results for next steps
                 self.first_capture_results = {
-                    'weapon_alt_found': weapon_found,
-                    'weapon_alt_region': weapon_alt_region,
-                    'weapon_alt_confidence': weapon_max_val,
                     'menu_found': menu_found,
                     'menu_region': menu_region,
                     'menu_confidence': menu_max_val,
                     'monitor_info': monitor_info,
-                    'screen_img': screen_img,
-                    'weapon_template': weapon_template  # Store template for step 2
+                    'screen_img': screen_img
                 }
                 
                 # Show results and ask for step 2
                 self.root.after(0, lambda: self._show_step1_results(
-                    screen_img, weapon_found, weapon_alt_region, weapon_max_val,
-                    menu_found, menu_region, menu_max_val, confidence_threshold, monitor_info
+                    screen_img, menu_found, menu_region, menu_max_val,
+                    confidence_threshold, monitor_info
                 ))
                 
             elif step == 2:
-                # Step 2: Detect weapon in slot 2 using the same weapon template
+                # Step 2: Detect weapon in Slot 1
                 if weapon_template_path is None:
                     self.root.after(0, lambda: self._show_detection_error("No enabled weapon template found in /images.\nAdd a weapon with a valid template first."))
                     return
                 
-                # Use the same weapon template from step 1 if available, otherwise load it
-                if self.first_capture_results and 'weapon_template' in self.first_capture_results:
-                    weapon_template = self.first_capture_results['weapon_template']
+                # Load weapon template
+                weapon_template = cv2.imread(str(weapon_template_path), cv2.IMREAD_GRAYSCALE)
+                
+                if weapon_template is None:
+                    self.root.after(0, lambda msg=weapon_template_name: self._show_detection_error(f"Failed to load {msg}"))
+                    return
+                
+                # Perform template matching for weapon in slot 1
+                weapon_result = cv2.matchTemplate(screen_gray, weapon_template, cv2.TM_CCOEFF_NORMED)
+                _, weapon_max_val, _, weapon_max_loc = cv2.minMaxLoc(weapon_result)
+                
+                # Check if found with sufficient confidence
+                weapon_found = weapon_max_val >= confidence_threshold
+                
+                # Calculate region (slot 1)
+                weapon_alt_region = None
+                if weapon_found:
+                    h, w = weapon_template.shape
+                    weapon_alt_region = (
+                        weapon_max_loc[0],
+                        weapon_max_loc[1],
+                        weapon_max_loc[0] + w,
+                        weapon_max_loc[1] + h
+                    )
+                
+                # Store results for step 3
+                self.second_capture_results = {
+                    'weapon_alt_found': weapon_found,
+                    'weapon_alt_region': weapon_alt_region,
+                    'weapon_alt_confidence': weapon_max_val,
+                    'monitor_info': monitor_info,
+                    'screen_img': screen_img,
+                    'weapon_template': weapon_template  # Store template for step 3
+                }
+                
+                # Show results and ask for step 3
+                if self.first_capture_results:
+                    self.root.after(0, lambda: self._show_step2_results(
+                        screen_img, weapon_found, weapon_alt_region, weapon_max_val,
+                        confidence_threshold, monitor_info
+                    ))
+                else:
+                    self.root.after(0, lambda: self._show_detection_error("Step 1 results not found. Please start over."))
+                
+            elif step == 3:
+                # Step 3: Detect weapon in Slot 2 using the same weapon template
+                if weapon_template_path is None:
+                    self.root.after(0, lambda: self._show_detection_error("No enabled weapon template found in /images.\nAdd a weapon with a valid template first."))
+                    return
+                
+                # Use the same weapon template from step 2 if available, otherwise load it
+                if self.second_capture_results and 'weapon_template' in self.second_capture_results:
+                    weapon_template = self.second_capture_results['weapon_template']
                 else:
                     weapon_template = cv2.imread(str(weapon_template_path), cv2.IMREAD_GRAYSCALE)
                 
@@ -848,7 +871,7 @@ class MacroGUI:
                 # Check if found with sufficient confidence
                 weapon_found = weapon_max_val >= confidence_threshold
                 
-                # Calculate region (slot 2 stored as weapon_region, will be saved to regions.weapon_alt)
+                # Calculate region (slot 2)
                 weapon_region = None
                 if weapon_found:
                     h, w = weapon_template.shape
@@ -859,24 +882,24 @@ class MacroGUI:
                         weapon_max_loc[1] + h
                     )
                 
-                # Combine results from both steps
-                if self.first_capture_results:
+                # Combine results from all steps
+                if self.first_capture_results and self.second_capture_results:
                     self.root.after(0, lambda: self._show_final_detection_results(
-                        self.first_capture_results['screen_img'],
+                        screen_img,
                         weapon_found,
                         weapon_region,
                         weapon_max_val,
-                        self.first_capture_results['weapon_alt_found'],
-                        self.first_capture_results['weapon_alt_region'],
-                        self.first_capture_results['weapon_alt_confidence'],
+                        self.second_capture_results['weapon_alt_found'],
+                        self.second_capture_results['weapon_alt_region'],
+                        self.second_capture_results['weapon_alt_confidence'],
                         self.first_capture_results['menu_found'],
                         self.first_capture_results['menu_region'],
                         self.first_capture_results['menu_confidence'],
                         confidence_threshold,
-                        self.first_capture_results['monitor_info']
+                        monitor_info
                     ))
                 else:
-                    self.root.after(0, lambda: self._show_detection_error("Step 1 results not found. Please start over."))
+                    self.root.after(0, lambda: self._show_detection_error("Previous step results not found. Please start over."))
             
         except Exception as e:
             self.root.after(0, lambda: self._show_detection_error(f"Detection error: {str(e)}"))
@@ -890,28 +913,58 @@ class MacroGUI:
         self.capture_mode = None
         self.autodetect_step = 1
         self.first_capture_results = None
+        self.second_capture_results = None
         messagebox.showerror("Auto-detection Failed", message)
         self.log(f"Auto-detection failed: {message}")
     
-    def _show_step1_results(self, screen_img, weapon_found, weapon_region, weapon_confidence,
-                           menu_found, menu_region, menu_confidence, threshold, monitor_info):
-        """Show step 1 results and prompt for step 2."""
-        # Check if both found
-        if not weapon_found and not menu_found:
-            self._show_detection_error(f"Neither region found. Weapon: {weapon_confidence:.2%}, Menu: {menu_confidence:.2%} (threshold: {threshold:.2%})")
-            return
-        
-        missing = []
-        if not weapon_found:
-            missing.append(f"weapon (confidence: {weapon_confidence:.2%}, threshold: {threshold:.2%})")
+    def _show_step1_results(self, screen_img, menu_found, menu_region, menu_confidence,
+                           threshold, monitor_info):
+        """Show step 1 results (Quick Menu) and prompt for step 2."""
+        # Check if menu found
         if not menu_found:
-            missing.append(f"menu (confidence: {menu_confidence:.2%}, threshold: {threshold:.2%})")
-        
-        if missing:
-            self._show_detection_error(f"Missing regions: {', '.join(missing)}")
+            self._show_detection_error(f"Quick Menu not found. Confidence: {menu_confidence:.2%}, threshold: {threshold:.2%}")
             return
         
-        # Both found - show preview and ask for step 2
+        # Menu found - show preview and ask for step 2
+        preview_img = screen_img.copy()
+        
+        # Draw menu region (blue)
+        cv2.rectangle(preview_img,
+                     (menu_region[0], menu_region[1]),
+                     (menu_region[2], menu_region[3]),
+                     (255, 0, 0), 2)
+        cv2.putText(preview_img, f"Quick Menu: {menu_confidence:.1%}",
+                   (menu_region[0], menu_region[1] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        
+        # Save preview
+        preview_path = get_preview_path("detection_preview_step1.png")
+        cv2.imwrite(str(preview_path), preview_img)
+        
+        # Show preview window with step 2 prompt
+        self._show_step1_preview_window(str(preview_path), menu_region, menu_confidence)
+        
+        # Continue to step 2
+        self.autodetect_step = 2
+        self.capture_status_label.config(
+            text=f"Step 2/3: Capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
+            foreground="blue"
+        )
+        self.log(f"Step 1 complete - Quick Menu: {menu_confidence:.1%} at {menu_region}")
+        self.log(f"Step 2/3: Waiting for capture with weapon in Slot 1. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
+        
+        # Restart capture listener for step 2
+        self.start_capture_listener()
+    
+    def _show_step2_results(self, screen_img, weapon_found, weapon_region, weapon_confidence,
+                           threshold, monitor_info):
+        """Show step 2 results (Slot 1) and prompt for step 3."""
+        # Check if weapon found
+        if not weapon_found:
+            self._show_detection_error(f"Weapon (Slot 1) not found. Confidence: {weapon_confidence:.2%}, threshold: {threshold:.2%}")
+            return
+        
+        # Weapon found - show preview and ask for step 3
         preview_img = screen_img.copy()
         
         # Draw weapon region (green) - Slot 1
@@ -931,52 +984,104 @@ class MacroGUI:
                    (text_x_slot1, weapon_region[1] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        # Draw menu region (blue)
-        cv2.rectangle(preview_img,
-                     (menu_region[0], menu_region[1]),
-                     (menu_region[2], menu_region[3]),
-                     (255, 0, 0), 2)
-        cv2.putText(preview_img, f"Menu: {menu_confidence:.1%}",
-                   (menu_region[0], menu_region[1] - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        
         # Save preview
-        preview_path = get_preview_path("detection_preview_step1.png")
+        preview_path = get_preview_path("detection_preview_step2.png")
         cv2.imwrite(str(preview_path), preview_img)
         
-        # Show preview window with step 2 prompt
-        self._show_step1_preview_window(str(preview_path), weapon_region, weapon_confidence, menu_region, menu_confidence)
+        # Show preview window with step 3 prompt
+        self._show_step2_preview_window(str(preview_path), weapon_region, weapon_confidence)
         
-        # Continue to step 2
-        self.autodetect_step = 2
+        # Continue to step 3
+        self.autodetect_step = 3
         self.capture_status_label.config(
-            text=f"Step 2/2: Capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
+            text=f"Step 3/3: Capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}",
             foreground="blue"
         )
-        self.log(f"Step 1 complete - Weapon (Slot 1): {weapon_confidence:.1%} at {weapon_region}, Menu: {menu_confidence:.1%} at {menu_region}")
-        self.log(f"Step 2/2: Waiting for capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
+        self.log(f"Step 2 complete - Weapon (Slot 1): {weapon_confidence:.1%} at {weapon_region}")
+        self.log(f"Step 3/3: Waiting for capture with weapon in Slot 2. Press: {self.config_manager.get('keybinds.capture_screen', 'ALT+P')}")
         
-        # Restart capture listener for step 2
+        # Restart capture listener for step 3
         self.start_capture_listener()
     
     def _show_step1_preview_window(
         self,
         preview_path: str,
-        weapon_region: Tuple[int, int, int, int],
-        weapon_confidence: float,
         menu_region: Tuple[int, int, int, int],
         menu_confidence: float,
     ) -> None:
-        """Show preview window for step 1 with step 2 prompt."""
+        """Show preview window for step 1 (Quick Menu) with step 2 prompt."""
         preview_window = tk.Toplevel(self.root)
-        preview_window.title("Auto-detection Step 1/2 - Results")
+        preview_window.title("Auto-detection Step 1/3 - Quick Menu")
         preview_window.attributes("-topmost", True)
 
-        self._create_preview_info_frame(
-            preview_window, weapon_region, weapon_confidence, menu_region, menu_confidence, step=1
-        )
+        self._create_step1_info_frame(preview_window, menu_region, menu_confidence)
         self._create_preview_image_frame(preview_window, preview_path)
         self._create_preview_button_frame(preview_window, "Continue to Step 2")
+    
+    def _show_step2_preview_window(
+        self,
+        preview_path: str,
+        weapon_region: Tuple[int, int, int, int],
+        weapon_confidence: float,
+    ) -> None:
+        """Show preview window for step 2 (Slot 1) with step 3 prompt."""
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title("Auto-detection Step 2/3 - Slot 1")
+        preview_window.attributes("-topmost", True)
+
+        self._create_step2_info_frame(preview_window, weapon_region, weapon_confidence)
+        self._create_preview_image_frame(preview_window, preview_path)
+        self._create_preview_button_frame(preview_window, "Continue to Step 3")
+    
+    def _create_step1_info_frame(
+        self,
+        parent: tk.Toplevel,
+        menu_region: Tuple[int, int, int, int],
+        menu_confidence: float,
+    ) -> None:
+        """Create info frame for step 1 preview (Quick Menu)."""
+        info_frame = ttk.Frame(parent)
+        info_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(
+            info_frame, text="Step 1/3 Complete!", font=("Arial", 12, "bold")
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            info_frame,
+            text=f"Quick Menu Region: {menu_region} - Confidence: {menu_confidence:.1%}",
+        ).pack(anchor=tk.W, padx=20)
+        ttk.Label(info_frame, text="", font=("Arial", 10)).pack()
+        ttk.Label(
+            info_frame,
+            text="Next: Capture screen with weapon in Slot 1",
+            font=("Arial", 10, "bold"),
+            foreground="blue",
+        ).pack(anchor=tk.W, padx=20)
+    
+    def _create_step2_info_frame(
+        self,
+        parent: tk.Toplevel,
+        weapon_region: Tuple[int, int, int, int],
+        weapon_confidence: float,
+    ) -> None:
+        """Create info frame for step 2 preview (Slot 1)."""
+        info_frame = ttk.Frame(parent)
+        info_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(
+            info_frame, text="Step 2/3 Complete!", font=("Arial", 12, "bold")
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            info_frame,
+            text=f"Weapon Region (Slot 1): {weapon_region} - Confidence: {weapon_confidence:.1%}",
+        ).pack(anchor=tk.W, padx=20)
+        ttk.Label(info_frame, text="", font=("Arial", 10)).pack()
+        ttk.Label(
+            info_frame,
+            text="Next: Capture screen with weapon in Slot 2",
+            font=("Arial", 10, "bold"),
+            foreground="blue",
+        ).pack(anchor=tk.W, padx=20)
 
     def _create_preview_info_frame(
         self,
@@ -1061,7 +1166,7 @@ class MacroGUI:
     def _show_final_detection_results(self, screen_img, weapon_found, weapon_region, weapon_confidence,
                                      weapon_alt_found, weapon_alt_region, weapon_alt_confidence,
                                      menu_found, menu_region, menu_confidence, threshold, monitor_info):
-        """Show final detection results combining both steps."""
+        """Show final detection results combining all three steps."""
         # Stop capture listener
         if self.capture_listener:
             self.capture_listener.stop()
@@ -1073,6 +1178,7 @@ class MacroGUI:
         self.capture_mode = None
         self.autodetect_step = 1
         self.first_capture_results = None
+        self.second_capture_results = None
         self.alt_pressed = False
         self.ctrl_pressed = False
         self.shift_pressed = False
@@ -1080,10 +1186,10 @@ class MacroGUI:
         # Check if weapon (slot 2) was found
         if not weapon_found:
             self.capture_status_label.config(
-                text=f"Step 2: Weapon (Slot 2) not found (confidence: {weapon_confidence:.2%}, threshold: {threshold:.2%})",
+                text=f"Step 3: Weapon (Slot 2) not found (confidence: {weapon_confidence:.2%}, threshold: {threshold:.2%})",
                 foreground="orange"
             )
-            self.log(f"Step 2: Weapon (Slot 2) not found. Confidence: {weapon_confidence:.2%}, Threshold: {threshold:.2%}")
+            self.log(f"Step 3: Weapon (Slot 2) not found. Confidence: {weapon_confidence:.2%}, Threshold: {threshold:.2%}")
             # Continue anyway with just slot 1
         
         # Update regions (weapon_alt is slot 2, weapon is slot 1)
@@ -1291,6 +1397,7 @@ class MacroGUI:
         self.capture_mode = None
         self.autodetect_step = 1
         self.first_capture_results = None
+        self.second_capture_results = None
         self.alt_pressed = False
         self.ctrl_pressed = False
         self.shift_pressed = False
@@ -1468,8 +1575,8 @@ class MacroGUI:
         self.shift_pressed = False
         
         current_step = self.autodetect_step
-        self.capture_status_label.config(text=f"Capturing and detecting (Step {current_step}/2)...", foreground="green")
-        self.log(f"Capture keybind pressed - capturing screen for auto-detection (Step {current_step}/2)")
+        self.capture_status_label.config(text=f"Capturing and detecting (Step {current_step}/3)...", foreground="green")
+        self.log(f"Capture keybind pressed - capturing screen for auto-detection (Step {current_step}/3)")
         
         # Run detection in thread with current step
         threading.Thread(target=lambda: self._auto_detect_regions_thread(step=current_step), daemon=True).start()
