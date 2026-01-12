@@ -64,11 +64,6 @@ def find_template_file(filename: str) -> Optional[Path]:
     if templates_path.exists():
         return templates_path
     
-    # Fallback: check root images directory for backwards compatibility
-    base_path = get_image_base_dir() / filename
-    if base_path.exists():
-        return base_path
-    
     return None
 
 
