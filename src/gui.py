@@ -544,12 +544,22 @@ class MacroGUI:
             var.trace("w", lambda *args, wid=weapon_id: self._save_weapon_delays(wid))
     
     def _save_weapon_enabled(self, weapon_id: str, enabled: bool):
-        """Save weapon enabled state."""
+        """Save weapon enabled state and apply changes in real-time."""
         self.config_manager.set(f"weapons.{weapon_id}.enabled", enabled)
         self.config_manager.save()
+        
+        # Apply changes to running macro (hot-reload)
+        if self.macro_activator is not None:
+            if enabled:
+                # Re-add weapon to detection
+                weapon_config = self.config_manager.get(f"weapons.{weapon_id}", {})
+                self.macro_activator.add_weapon_config(weapon_id, weapon_config)
+            else:
+                # Remove weapon from detection
+                self.macro_activator.update_weapon_config(weapon_id, enabled=False)
     
     def _on_profile_change(self, weapon_id: str):
-        """Handle profile change for a weapon."""
+        """Handle profile change for a weapon and apply changes in real-time."""
         if weapon_id not in self.weapon_delay_vars:
             return
         
@@ -574,6 +584,10 @@ class MacroGUI:
             vars_dict["up_max"].set(str(profile_delays.get("click_up_max", 64)))
             for entry in entries:
                 entry.config(state="disabled")
+            
+            # Apply changes to running macro (hot-reload)
+            if self.macro_activator is not None:
+                self.macro_activator.update_weapon_config(weapon_id, delays=profile_delays)
         else:
             # Custom profile - enable entries and load saved custom values
             custom_delays = self.config_manager.get(f"weapons.{weapon_id}.delays", FALLBACK_DELAYS)
@@ -583,11 +597,15 @@ class MacroGUI:
             vars_dict["up_max"].set(str(custom_delays.get("click_up_max", 64)))
             for entry in entries:
                 entry.config(state="normal")
+            
+            # Apply changes to running macro (hot-reload)
+            if self.macro_activator is not None:
+                self.macro_activator.update_weapon_config(weapon_id, delays=custom_delays)
         
         self.config_manager.save()
     
     def _save_weapon_delays(self, weapon_id: str):
-        """Save weapon delay configuration."""
+        """Save weapon delay configuration and apply changes in real-time."""
         if weapon_id not in self.weapon_delay_vars:
             return
         
@@ -601,6 +619,14 @@ class MacroGUI:
             }
             self.config_manager.set(f"weapons.{weapon_id}.delays", delays)
             self.config_manager.save()
+            
+            # Apply changes to running macro (hot-reload)
+            # Only apply if using custom profile (entries are enabled)
+            profile_key = self.config_manager.get(f"weapons.{weapon_id}.profile", "custom")
+            default_profiles = vars_dict.get("default_profiles", {})
+            if profile_key == "custom" or profile_key not in default_profiles:
+                if self.macro_activator is not None:
+                    self.macro_activator.update_weapon_config(weapon_id, delays=delays)
         except ValueError:
             pass  # Invalid input, ignore
     

@@ -291,6 +291,112 @@ class MacroActivator:
             self.current_weapon_id = weapon_id
             print(f"Switched to {weapon_name}: delays down={delays['click_down_min']}-{delays['click_down_max']}ms, up={delays['click_up_min']}-{delays['click_up_max']}ms")
 
+    def update_weapon_config(self, weapon_id: str, delays: Optional[dict] = None, enabled: Optional[bool] = None) -> None:
+        """
+        Update weapon configuration at runtime (hot-reload).
+        
+        This method allows updating weapon settings without restarting the macro.
+        Changes are applied immediately to the running autoclicker if the weapon
+        is currently detected.
+        
+        Args:
+            weapon_id: ID of the weapon to update
+            delays: New delay configuration dict with click_down_min, click_down_max, 
+                   click_up_min, click_up_max keys (optional)
+            enabled: Whether the weapon should be enabled (optional)
+        """
+        if weapon_id not in self.weapon_hashes:
+            return
+        
+        weapon_data = self.weapon_hashes[weapon_id]
+        weapon_name = weapon_data["name"]
+        
+        # Update delays if provided
+        if delays is not None:
+            weapon_data["delays"] = delays
+            
+            # If this weapon is currently active, apply the new delays immediately
+            if self.current_weapon_id == weapon_id:
+                self.autoclicker.click_down_min = delays["click_down_min"]
+                self.autoclicker.click_down_max = delays["click_down_max"]
+                self.autoclicker.click_up_min = delays["click_up_min"]
+                self.autoclicker.click_up_max = delays["click_up_max"]
+                print(f"Hot-reload: {weapon_name} delays updated to down={delays['click_down_min']}-{delays['click_down_max']}ms, up={delays['click_up_min']}-{delays['click_up_max']}ms")
+        
+        # Handle enabled state change
+        if enabled is not None:
+            if not enabled:
+                # Weapon disabled - remove from weapon_hashes
+                del self.weapon_hashes[weapon_id]
+                print(f"Hot-reload: {weapon_name} disabled and removed from detection")
+                
+                # If this was the current weapon, deactivate macro
+                if self.current_weapon_id == weapon_id:
+                    self.current_weapon_id = None
+                    if self.macro_active:
+                        self._deactivate_macro()
+    
+    def add_weapon_config(self, weapon_id: str, weapon_config: dict) -> bool:
+        """
+        Add or re-add a weapon configuration at runtime.
+        
+        This is used when a weapon is enabled from the GUI.
+        
+        Args:
+            weapon_id: ID of the weapon to add
+            weapon_config: Full weapon configuration dict
+            
+        Returns:
+            True if weapon was successfully added, False otherwise
+        """
+        weapon_name = weapon_config.get("name", weapon_id.capitalize())
+        
+        # Get template filenames
+        template_base = weapon_config.get("template", f"{weapon_id}.png")
+        base_name = template_base.rsplit('.', 1)[0]
+        template_slot1_name = weapon_config.get("template_slot1", f"{base_name}_slot1.png")
+        template_slot2_name = weapon_config.get("template_slot2", f"{base_name}_slot2.png")
+        
+        # Load templates
+        template_slot1_path = find_template_file(template_slot1_name)
+        template_slot1_hash = None
+        if template_slot1_path:
+            template_slot1_img = self.detector.load_image(template_slot1_path)
+            if template_slot1_img is not None:
+                template_slot1_hash = self.detector.calculate_hash(template_slot1_img)
+        
+        template_slot2_path = find_template_file(template_slot2_name)
+        template_slot2_hash = None
+        if template_slot2_path:
+            template_slot2_img = self.detector.load_image(template_slot2_path)
+            if template_slot2_img is not None:
+                template_slot2_hash = self.detector.calculate_hash(template_slot2_img)
+        
+        # Skip if no templates loaded
+        if template_slot1_hash is None and template_slot2_hash is None:
+            print(f"Hot-reload: Cannot enable {weapon_name} - no valid templates found")
+            return False
+        
+        # Get delays based on profile
+        profile = weapon_config.get("profile", "custom")
+        default_profiles = weapon_config.get("default_profiles", {})
+        
+        if profile in default_profiles:
+            delays = default_profiles[profile].get("delays", FALLBACK_DELAYS.copy())
+        else:
+            delays = weapon_config.get("delays", FALLBACK_DELAYS.copy())
+        
+        self.weapon_hashes[weapon_id] = {
+            "hash_slot1": template_slot1_hash,
+            "hash_slot2": template_slot2_hash,
+            "name": weapon_name,
+            "delays": delays,
+            "profile": profile,
+        }
+        
+        print(f"Hot-reload: {weapon_name} enabled and added to detection")
+        return True
+
     def _print_region_info(self) -> None:
         """Print region information for debugging."""
         w_width = self.weapon_region[2] - self.weapon_region[0]
