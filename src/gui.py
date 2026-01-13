@@ -1163,6 +1163,57 @@ class MacroGUI:
             img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
         return img
     
+    def _show_template_capture_preview(
+        self,
+        captured_img: np.ndarray,
+        template_name: str,
+        step: int,
+        total_steps: int,
+        next_action: Optional[str] = None
+    ) -> None:
+        """Show template capture preview window (similar to auto-detect preview).
+        
+        Args:
+            captured_img: The captured template image (BGR numpy array)
+            template_name: Name of the template (e.g., "Venator Slot 1")
+            step: Current step number
+            total_steps: Total number of steps
+            next_action: Next action description (None = final step)
+        """
+        is_final = next_action is None
+        
+        # Scale up template for visibility and save
+        preview_path = get_preview_path("template_capture_preview.png")
+        scaled = cv2.resize(captured_img, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
+        cv2.imwrite(str(preview_path), scaled)
+        
+        # Create window
+        window = tk.Toplevel(self.root)
+        window.attributes("-topmost", True)
+        title = f"Template Capture Complete - {template_name}" if is_final else f"Template Capture Step {step}/{total_steps} - {template_name}"
+        window.title(title)
+        
+        # Info frame
+        info_frame = ttk.Frame(window)
+        info_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        h, w = captured_img.shape[:2]
+        if is_final:
+            ttk.Label(info_frame, text=f"✓ {template_name} captured successfully!", 
+                     font=("Arial", 12, "bold"), foreground="green").pack(anchor=tk.W)
+            ttk.Label(info_frame, text=f"Size: {w}x{h} px").pack(anchor=tk.W, padx=20)
+        else:
+            ttk.Label(info_frame, text=f"Step {step}/{total_steps} Complete!", 
+                     font=("Arial", 12, "bold")).pack(anchor=tk.W)
+            ttk.Label(info_frame, text=f"{template_name}: {w}x{h} px").pack(anchor=tk.W, padx=20)
+            ttk.Label(info_frame, text="").pack()
+            ttk.Label(info_frame, text=f"Next: {next_action}", 
+                     font=("Arial", 10, "bold"), foreground="blue").pack(anchor=tk.W, padx=20)
+        
+        # Image and button
+        self._create_preview_image_frame(window, str(preview_path))
+        self._create_preview_button_frame(window, "Done" if is_final else f"Continue to Step {step + 1}")
+    
     def _show_final_detection_results(self, screen_img, weapon_found, weapon_region, weapon_confidence,
                                      weapon_alt_found, weapon_alt_region, weapon_alt_confidence,
                                      menu_found, menu_region, menu_confidence, threshold, monitor_info):
@@ -1769,12 +1820,13 @@ class MacroGUI:
         self.waiting_for_capture = True
         
         weapon_name = self.config_manager.get(f"weapons.{weapon_id}.name", weapon_id.capitalize())
+        keybind = self.config_manager.get("keybinds.capture_screen", "ALT+P")
         self.template_status_label.config(
-            text=f"Step 1/2: Place {weapon_name} in Slot 1, then press ALT+P",
+            text=f"Step 1/2: Place {weapon_name} in Slot 1, then press {keybind}",
             foreground="blue",
             font=("TkDefaultFont", 9)
         )
-        self.log(f"Template capture started for {weapon_name} - Step 1/2: Slot 1")
+        self.log(f"Template capture - Step 1/2: Place {weapon_name} in Slot 1, then press {keybind}")
         
         # Update button state
         if weapon_id in self.weapon_template_buttons:
@@ -1805,11 +1857,12 @@ class MacroGUI:
         self.template_capture_step = 1
         self.waiting_for_capture = True
         
+        keybind = self.config_manager.get("keybinds.capture_screen", "ALT+P")
         self.template_status_label.config(
-            text="Open the quick menu (Q), then press ALT+P",
+            text=f"Step 1/1: Open quick menu (Q), then press {keybind}",
             foreground="blue"
         )
-        self.log("Menu template capture started - Open quick menu and press ALT+P")
+        self.log(f"Menu template capture - Step 1/1: Open quick menu, then press {keybind}")
         
         # Update button state
         self.capture_menu_btn.config(state=tk.DISABLED)
@@ -1880,18 +1933,22 @@ class MacroGUI:
                 menu_filename = "menu_captured.png"
                 menu_path = get_captured_path(menu_filename)
                 
-                success = self._capture_template_from_region(
+                success, captured_img = self._capture_template_from_region(
                     tuple(menu_region),
                     menu_path,
                     "Menu"
                 )
-                if success:
+                if success and captured_img is not None:
                     self.template_status_label.config(
-                        text="Menu template captured successfully!",
+                        text="✓ Menu template captured successfully!",
                         foreground="green"
                     )
                     self.log(f"Menu template captured successfully: {menu_filename}")
                     self.menu_template_status.config(text="Captured", foreground="green")
+                    
+                    # Show preview window
+                    self.root.after(100, lambda img=captured_img: self._show_template_capture_preview(
+                        img, "Quick Menu", 1, 1))
                 else:
                     self.template_status_label.config(
                         text="Failed to capture menu template",
@@ -1912,13 +1969,15 @@ class MacroGUI:
                 base_name = template_base.rsplit('.', 1)[0]  # Remove extension
                 template_slot1_name = weapon_config.get("template_slot1", f"{base_name}_slot1.png")
                 
-                success = self._capture_template_from_region(
+                weapon_name = weapon_config.get("name", self.template_capture_weapon_id.capitalize())
+                
+                success, captured_img = self._capture_template_from_region(
                     tuple(weapon_region),
                     get_captured_path(template_slot1_name),
-                    f"{weapon_config.get('name', self.template_capture_weapon_id)} Slot 1"
+                    f"{weapon_name} Slot 1"
                 )
                 
-                if success:
+                if success and captured_img is not None:
                     # Update status
                     if self.template_capture_weapon_id in self.weapon_template_buttons:
                         self.weapon_template_buttons[self.template_capture_weapon_id]["slot1_status"].config(
@@ -1929,22 +1988,18 @@ class MacroGUI:
                     self.template_capture_mode = "weapon_slot2"
                     self.template_capture_step = 2
                     
-                    weapon_name = weapon_config.get("name", self.template_capture_weapon_id.capitalize())
-                    
-                    # Show notification that slot 1 is complete and slot 2 is next
-                    messagebox.showinfo(
-                        "Slot 1 Captured",
-                        f"Slot 1 template captured successfully!\n\n"
-                        f"Now place {weapon_name} in Slot 2 and press ALT+P to capture Slot 2."
-                    )
-                    
-                    # Update status label with more prominent styling
+                    # Show preview window
+                    keybind = self.config_manager.get("keybinds.capture_screen", "ALT+P")
+                    self.root.after(100, lambda img=captured_img, name=weapon_name, kb=keybind: 
+                        self._show_template_capture_preview(
+                            img, f"{name} Slot 1", 1, 2, f"Place {name} in Slot 2 and press {kb}"))
                     self.template_status_label.config(
-                        text=f"✓ Slot 1 captured! Step 2/2: Place {weapon_name} in Slot 2, then press ALT+P",
-                        foreground="green",
+                        text=f"Step 2/2: Place {weapon_name} in Slot 2, then press {keybind}",
+                        foreground="blue",
                         font=("TkDefaultFont", 10, "bold")
                     )
-                    self.log(f"Slot 1 captured - Step 2/2: Place {weapon_name} in Slot 2")
+                    self.log(f"Step 1/2 complete - {weapon_name} Slot 1 captured")
+                    self.log(f"Step 2/2: Place {weapon_name} in Slot 2, then press {keybind}")
                 else:
                     self.template_status_label.config(
                         text="Failed to capture slot 1 template",
@@ -1962,26 +2017,32 @@ class MacroGUI:
                 base_name = template_base.rsplit('.', 1)[0]  # Remove extension
                 template_slot2_name = weapon_config.get("template_slot2", f"{base_name}_slot2.png")
                 
-                success = self._capture_template_from_region(
+                weapon_name = weapon_config.get("name", self.template_capture_weapon_id.capitalize())
+                
+                success, captured_img = self._capture_template_from_region(
                     tuple(weapon_alt_region),
                     get_captured_path(template_slot2_name),
-                    f"{weapon_config.get('name', self.template_capture_weapon_id)} Slot 2"
+                    f"{weapon_name} Slot 2"
                 )
                 
-                if success:
+                if success and captured_img is not None:
                     # Update status
                     if self.template_capture_weapon_id in self.weapon_template_buttons:
                         self.weapon_template_buttons[self.template_capture_weapon_id]["slot2_status"].config(
                             text="Captured", foreground="green"
                         )
                     
-                    weapon_name = weapon_config.get("name", self.template_capture_weapon_id.capitalize())
+                    # Show preview window
+                    self.root.after(100, lambda img=captured_img, name=weapon_name: 
+                        self._show_template_capture_preview(img, f"{name} Slot 2", 2, 2))
+                    
                     self.template_status_label.config(
                         text=f"✓ {weapon_name} templates captured successfully! (Slot 1 & Slot 2)",
                         foreground="green",
                         font=("TkDefaultFont", 9)
                     )
-                    self.log(f"{weapon_name} templates captured successfully (Slot 1 & Slot 2)")
+                    self.log(f"Step 2/2 complete - {weapon_name} Slot 2 captured")
+                    self.log(f"✓ {weapon_name} templates captured successfully (Slot 1 & Slot 2)")
                 else:
                     self.template_status_label.config(
                         text="Failed to capture slot 2 template",
@@ -1995,8 +2056,12 @@ class MacroGUI:
         self.root.after(500, lambda: self.root.deiconify())
         self.root.after(500, lambda: self.root.lift())
     
-    def _capture_template_from_region(self, region: Tuple[int, int, int, int], save_path: Path, template_name: str) -> bool:
-        """Capture template from a specific region and save it."""
+    def _capture_template_from_region(self, region: Tuple[int, int, int, int], save_path: Path, template_name: str) -> Tuple[bool, Optional[np.ndarray]]:
+        """Capture template from a specific region and save it.
+        
+        Returns:
+            Tuple of (success: bool, captured_image: np.ndarray or None)
+        """
         try:
             # Use HashDetector to capture region
             from .detection import HashDetector
@@ -2005,7 +2070,7 @@ class MacroGUI:
             
             if region_img is None:
                 self.log(f"Failed to capture region for {template_name}")
-                return False
+                return False, None
             
             # Save template
             cv2.imwrite(str(save_path), region_img)
@@ -2015,17 +2080,11 @@ class MacroGUI:
             
             self.log(f"Template saved: {save_path.name} ({region_img.shape[1]}x{region_img.shape[0]} px, hash: {template_hash})")
             
-            # Show preview
-            preview = cv2.resize(region_img, None, fx=2, fy=2)
-            cv2.imshow(f"Captured {template_name} Template", preview)
-            cv2.waitKey(2000)
-            cv2.destroyAllWindows()
-            
-            return True
+            return True, region_img
             
         except Exception as e:
             self.log(f"Error capturing template {template_name}: {e}")
-            return False
+            return False, None
     
     def cancel_template_capture(self):
         """Cancel template capture mode."""
