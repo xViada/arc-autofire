@@ -59,19 +59,19 @@ DEFAULT_WEAPONS = {
              "fast": {
                 "name": "Fast",
                 "delays": {
-                    "click_down_min": 19,
-                    "click_down_max": 19,
-                    "click_up_min": 19,
-                    "click_up_max": 19,
+                    "click_down_min": 35,
+                    "click_down_max": 35,
+                    "click_up_min": 35,
+                    "click_up_max": 35,
                 }
             },
             "optimal": {
                 "name": "Optimal",
                 "delays": {
-                    "click_down_min": 19,
-                    "click_down_max": 23,
-                    "click_up_min": 19,
-                    "click_up_max": 23,
+                    "click_down_min": 35,
+                    "click_down_max": 38,
+                    "click_up_min": 35,
+                    "click_up_max": 38,
                 }
             },
         },
