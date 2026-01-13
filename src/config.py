@@ -12,7 +12,7 @@ DEFAULT_MENU_REGION = (950, 372, 970, 392)  # Quick menu region
 # Default detection parameters
 DEFAULT_HASH_THRESHOLD = 8
 DEFAULT_HASH_SIZE = 16
-DEFAULT_LOOP_DELAY = 0.3
+DEFAULT_LOOP_DELAY = 0.02
 DEFAULT_INACTIVE_DELAY = 0.5
 
 # Auto-click timing (milliseconds) - Default values, can be overridden per weapon

@@ -80,11 +80,17 @@ class AutoClicker:
         if pressed:
             if self._is_simulated_press():
                 return
+            # Safeguard: ignore if already pressed (duplicate event or late-arriving simulated)
+            if self.left_button_pressed:
+                return
             self.left_button_pressed = True
             if self.macro_active_callback and self.macro_active_callback():
                 self._start_autoclick()
         else:
             if self._is_simulated_release():
+                return
+            # Safeguard: ignore if already released (duplicate event or late-arriving simulated)
+            if not self.left_button_pressed:
                 return
             self.left_button_pressed = False
             self._stop_autoclick()
@@ -140,9 +146,6 @@ class AutoClicker:
         Auto-click loop - simulates clicks while user holds left button.
         Uses random delays to appear more human-like.
         """
-        if self.macro_active_callback and self.macro_active_callback():
-            print("  [Auto-click thread started]")
-
         POLL_INTERVAL = 0.01
 
         while not self.should_stop_autoclick:
@@ -156,8 +159,6 @@ class AutoClicker:
                 print(f"Auto-click error: {e}", file=sys.stderr)
                 break
 
-        if self.autoclick_running:
-            print("  [Auto-click thread stopped]")
         self.autoclick_running = False
 
     def _should_continue_clicking(self) -> bool:
@@ -207,10 +208,10 @@ class AutoClicker:
         if self.autoclick_thread and self.autoclick_thread.is_alive():
             self.autoclick_thread.join(timeout=1.0)
         self.autoclick_running = False
-
-        with self._click_lock:
-            self.simulated_presses_pending = 0
-            self.simulated_releases_pending = 0
+        
+        # Do NOT reset counters here - let them drain naturally as in-flight
+        # events arrive at pynput. This prevents race conditions where a
+        # simulated event arrives after reset and corrupts the button state.
 
     def start_if_button_pressed(self) -> None:
         """Start auto-click if button is already pressed."""
